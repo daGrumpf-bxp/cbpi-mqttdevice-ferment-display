@@ -1,0 +1,256 @@
+# cbpi-mqttdevice-ferment-display
+
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+![Status: Phase 1](https://img.shields.io/badge/status-phase%201%20%E2%80%93%20serial%20validated-yellow)
+![Target: ESP8266](https://img.shields.io/badge/target-Wemos%20D1%20mini-green)
+![Server: CBPi4](https://img.shields.io/badge/server-CraftBeerPi4-orange)
+
+Wall-mounted display next to a fermenter, driven by [CraftBeerPi4](https://github.com/PiBrewing/craftbeerpi4) over MQTT. Shows current and target temperature, regulation mode, and live cooler/heater state.
+
+**Phase 1 (current)** — read-only display on **Wemos D1 mini** (ESP8266) + **SSD1306 128×64 OLED**.
+**Phase 2 (planned, hardware in transit)** — full UI on **ESP32 WROOM-32** + **ST7789V 2.0" TFT 240×320** + rotary encoder + buttons, with local setpoint and mode control.
+
+---
+
+## What it shows
+
+Display layout on 128×64 OLED (Phase 1):
+
+```
++------------------------------+
+| Tornado              W M     |   fermenter name + WiFi/MQTT status icons
+|------------------------------|
+|                              |
+|   15.9      >   25.0         |   current T° → target T° (large, readable @ 2-3m)
+|                              |
+|------------------------------|
+|  COOL *           AUTO       |   cooler relay state · regulation mode (AUTO/OFF)
++------------------------------+
+```
+
+A `!` to the right of the target temperature signals stale data (>90s with no update from CBPi4 — typically indicates the server or broker is down).
+
+The onboard blue LED gives status at a glance, **without needing to look at the screen or serial**:
+
+| LED pattern | Meaning |
+|---|---|
+| Solid ON with brief dip every 2s | **READY** — WiFi + MQTT + subscribed, everything healthy |
+| Double-blink slow | WiFi OK, MQTT down (check broker, credentials) |
+| Fast symmetric blink | WiFi down (check SSID, password, signal) |
+| Solid ON, no variation | Boot in progress, or `loop()` is stuck (bug) |
+| Brief OFF flash overlay | An MQTT message just arrived (visual confirmation of live traffic) |
+
+---
+
+## Quick start
+
+### Prerequisites
+
+- A Linux machine for development (Windows/macOS work too, paths and udev rules differ)
+- A Wemos D1 mini board (clones with CH340 or CP2102 USB-serial work)
+- An SSD1306 I²C OLED (1.3" SH1106 works too — just swap the U8g2 constructor in `display.cpp`)
+- A running CBPi4 instance with MQTT enabled, a fermenter configured, and a working MQTT broker (typically `mosquitto` on the same Pi as CBPi4)
+
+### Install PlatformIO (one-time setup)
+
+PlatformIO is a CLI-friendly build system for embedded targets. No IDE required.
+
+```bash
+pip install --user -U platformio
+sudo usermod -a -G dialout $USER       # logout/login after this
+```
+
+### Build and flash
+
+```bash
+git clone https://github.com/daGrumpf-bxp/cbpi-mqttdevice-ferment-display.git
+cd cbpi-mqttdevice-ferment-display
+
+cp include/secrets.h.example include/secrets.h
+vi include/secrets.h                   # fill in WiFi, MQTT broker, FERMENTER_ID
+
+pio run -t upload                      # builds, then uploads to /dev/ttyUSB0 (auto-detected)
+pio device monitor                     # 115200 bauds — Ctrl-T then Ctrl-X to exit
+```
+
+Find your `FERMENTER_ID` by sniffing the broker:
+
+```bash
+mosquitto_sub -h <broker> -v -t 'cbpi/fermenterupdate/#'
+# Toggle a fermenter in CBPi4 UI — the topic contains the ID.
+```
+
+### Wiring (D1 mini + SSD1306)
+
+| OLED | D1 mini |
+|---|---|
+| GND | GND |
+| VCC | 3V3 |
+| SDA | D2 (GPIO 4) |
+| SCL | D1 (GPIO 5) |
+
+Pin assignments are in `include/config.h` — edit there if you need different pins (e.g. on a board where D1/D2 are already used for relays).
+
+---
+
+## How it works
+
+A high-level overview is in [ARCHITECTURE.md](ARCHITECTURE.md). In short:
+
+- The device subscribes to `cbpi/fermenterupdate/<your_fermenter_id>`. From that payload, it discovers the IDs of the configured sensor, cooler, and heater.
+- It subscribes dynamically to `cbpi/sensordata/<sensor_id>` for live temperature, and to `cbpi/actorupdate/<cooler_id>` briefly to discover the **raw MQTT topic** that drives the relay (`actor/4RB01/R01` or similar).
+- Once the raw topic is known, it switches to listening there — that's the real-time, accurate source of cooler state. `actorupdate` itself has stale retained values and isn't trustworthy for live state. See [ARCHITECTURE.md → Decision: raw actor topic](ARCHITECTURE.md#decision-use-the-raw-actor-topic-not-cbpiactorupdate) for the gory details.
+- If CBPi4 reassigns the sensor or relay in its UI, the next `fermenterupdate` triggers a re-subscription. No reflash needed.
+
+The entire firmware is non-blocking (no `delay()`, no `while(!connected)`), event-driven, and survives WiFi/MQTT outages cleanly.
+
+---
+
+## Project layout
+
+```
+.
+├── platformio.ini          PlatformIO build config (pinned lib versions)
+├── README.md               (this file)
+├── ARCHITECTURE.md         technical doc — read this before contributing
+├── CHANGELOG.md            release history
+├── LICENSE                 GPL-3.0
+├── include/
+│   ├── config.h            compile-time tunables (pins, timeouts, topics)
+│   └── secrets.h.example   credentials template (real one is gitignored)
+├── src/
+│   ├── main.cpp            orchestration
+│   ├── state.{h,cpp}       single source of truth (POD struct)
+│   ├── cbpi_proto.{h,cpp}  CBPi4 JSON parsers (host-testable)
+│   ├── net_wifi.{h,cpp}    non-blocking WiFi with event handlers
+│   ├── net_mqtt.{h,cpp}    async MQTT with dynamic subscription tracking
+│   ├── display.{h,cpp}     OLED rendering via U8g2
+│   └── heartbeat.{h,cpp}   LED status patterns + activity pulses
+└── test/
+    ├── Makefile            `make test` to run host-side parser tests
+    ├── test_main.cpp       29 unit tests against real CBPi4 payloads
+    ├── Arduino.{h,cpp}     minimal Arduino stub for host build
+    └── README.md
+```
+
+---
+
+## Troubleshooting
+
+### LED is blinking fast and symmetric
+
+WiFi can't associate. Check `WIFI_SSID` and `WIFI_PASS` in `include/secrets.h`. Open `pio device monitor` to see the disconnect reason code:
+
+| Reason | Cause | Fix |
+|---|---|---|
+| 202 (AUTH_FAIL) | Wrong password | Check `WIFI_PASS` |
+| 201 (NO_AP_FOUND) | SSID not visible | Check `WIFI_SSID`, signal range |
+| 200 (BEACON_TIMEOUT) | Signal dropping | Move closer, check AP load |
+
+### LED is double-blink slow
+
+WiFi works, MQTT broker rejects the connection. Open the monitor and read the reason code:
+
+| Reason | Cause | Fix |
+|---|---|---|
+| 5 (NOT_AUTHORIZED) | Bad MQTT credentials | Set `MQTT_USER`/`MQTT_PASS` in `secrets.h` to match your broker config |
+| 0 (TCP_DISCONNECTED) | Broker unreachable | Check `MQTT_HOST`/`MQTT_PORT`, network route, broker is running |
+| 2 (IDENTIFIER_REJECTED) | Duplicate client ID | Make sure `DEVICE_NAME` is unique across all your boards |
+
+### Upload fails: "Failed to connect to ESP8266" or "Timed out waiting for packet header"
+
+Common causes on Linux:
+
+1. **udev rules not installed** — PlatformIO will warn about this. Install:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/system/99-platformio-udev.rules | sudo tee /etc/udev/rules.d/99-platformio-udev.rules
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+2. **ModemManager hogging the port** — disable it if you're not using cellular modems:
+   ```bash
+   sudo systemctl stop ModemManager && sudo systemctl disable ModemManager
+   ```
+3. **Cheap clone needs slower baud** — drop `upload_speed` in `platformio.ini` from `921600` to `115200`.
+4. **D1 mini's onboard USB is dead** — surprisingly common on used boards. Use an external USB-TTL adapter, wire `TX/RX/D3(GPIO0)/GND/5V`, and either hold reset during upload or use the "open minicom → press RESET → close minicom → flash" trick to put the chip in bootloader mode.
+
+### "Cooler shows ON but UI says OFF"
+
+This was a real bug we hit during development. Resolved in v0.4 by listening to the raw actor topic instead of `cbpi/actorupdate/`. See [ARCHITECTURE.md → CBPi4 gotcha](ARCHITECTURE.md#gotcha-cbpiactorupdate-has-stale-retained-values). If you see this again, the symptom likely isn't the firmware but stale retained values on a topic somewhere — sniff with `mosquitto_sub --retained-only -t '#'` to see what's lurking.
+
+### State shows `stale=1` permanently
+
+Means no `fermenterupdate` or `sensordata` arrived in the last 90s. Check:
+- `mosquitto_sub -h <broker> -t 'cbpi/fermenterupdate/<your_id>'` — should produce a message at least every 60s
+- CBPi4 is running, MQTT is enabled (`mqtt: True` in `config.yaml`)
+- Broker is healthy: `systemctl status mosquitto`
+
+### Tests fail locally
+
+```bash
+cd test && make clean && make test
+```
+
+If a test fails, your local CBPi4 might emit a slightly different payload than what's pinned. Open `test/test_main.cpp` and adjust the `PAYLOAD_*` constants to match what your `mosquitto_sub` dump shows. If it's a real CBPi4 quirk, open an issue with the dump so we can update the upstream tests.
+
+---
+
+## Roadmap
+
+### Phase 1 — D1 mini + OLED (current)
+
+- [x] Non-blocking WiFi (event-driven, `WiFi.onEvent*`)
+- [x] Async MQTT (AsyncMqttClient, dynamic subscription tracking)
+- [x] CBPi4 fermenter / sensor / raw actor parsing
+- [x] Onboard LED status patterns
+- [x] SSD1306 128×64 rendering via U8g2
+- [x] Host-side unit tests (29 cases against real CBPi4 payloads)
+- [ ] Field test on real fermenter (Tornado)
+- [ ] 3D-printed enclosure (front plate STL)
+
+### Phase 2 — ESP32 + TFT + encoder
+
+- [ ] Port to ESP32 WROOM-32 (`[env:esp32]` in `platformio.ini`)
+- [ ] TFT 2.0" 240×320 rendering (TFT_eSPI or LovyanGFX)
+- [ ] KY-040 rotary encoder: adjust setpoint ±0.5°C
+- [ ] MODE button: toggle AUTO/OFF
+- [ ] BACK button: navigation
+- [ ] Publish `cbpi/updatefermenter` with new payload to control CBPi
+- [ ] Multi-fermenter dashboard (optional, if useful in practice)
+
+See [ARCHITECTURE.md → Phase 2 plan](ARCHITECTURE.md#phase-1-vs-phase-2-plan) for the technical breakdown.
+
+---
+
+## Contributing
+
+Issues and pull requests welcome. A few conventions:
+
+- Run the host-side tests before opening a PR: `cd test && make test` (29 tests must pass).
+- Keep modules single-purpose. The clean separation between parsing (`cbpi_proto`), state (`state`), network (`net_wifi`/`net_mqtt`), and rendering (`display`) is what makes the Phase 1 → Phase 2 port realistic.
+- If your change contradicts a design decision in [ARCHITECTURE.md](ARCHITECTURE.md), that's fine — but update the doc to reflect the new rationale.
+- Code style: 4-space indent, `snake_case` for functions and variables, `PascalCase` for types and enums, namespaces over class hierarchies.
+- Commit messages and code comments in English. Issue discussions can be in French or English.
+
+For bug reports, please include:
+- Hardware (D1 mini clone, OLED model)
+- CBPi4 version (`pip show cbpi`)
+- Serial log output during the problematic behaviour
+- LED pattern observed
+- Output of `mosquitto_sub --retained-only -t '#'` if relevant
+
+---
+
+## Acknowledgements and prior art
+
+- **[PiBrewing/craftbeerpi4](https://github.com/PiBrewing/craftbeerpi4)** — the brewing controller this device complements. Without CBPi4 there's nothing to display.
+- **[InnuendoPi/MQTTDevice4](https://github.com/InnuendoPi/MQTTDevice4)** — the inspiration for the CBPi4 MQTT protocol layer. We initially considered forking but went from-scratch (see [ARCHITECTURE.md](ARCHITECTURE.md)). The topic naming conventions and payload formats were verified by reverse-engineering an MQTTDevice4 firmware binary.
+- **[marvinroger/async-mqtt-client](https://github.com/marvinroger/async-mqtt-client)** — the non-blocking MQTT library that makes the whole thing reliable.
+- **[olikraus/U8g2](https://github.com/olikraus/U8g2)** — pixel-perfect monochrome graphics with a sensible API.
+
+---
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+Choice of GPL-3.0 is for consistency with the CBPi4 ecosystem (MQTTDevice4 and CBPi4 itself are GPL-licensed).

@@ -1,0 +1,22 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+.clang_complete
+.gcc-flags.json
+
+# Secrets — NEVER commit your credentials
+include/secrets.h
+
+# OS / editor
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Host-side test artefacts
+test/test_proto
+test/ArduinoJson.h
+test/fake_secrets/
