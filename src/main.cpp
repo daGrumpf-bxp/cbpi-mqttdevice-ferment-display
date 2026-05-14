@@ -16,6 +16,7 @@
 #include "net_mqtt.h"
 #include "display.h"
 #include "heartbeat.h"
+#include "watchdog.h"
 
 // ---- periodic state dump ---------------------------------------------------
 static uint32_t s_last_dump_ms = 0;
@@ -38,6 +39,7 @@ void setup() {
     Serial.println(F("============================================"));
 
     heartbeat::begin();     // LED ON ASAP -> visual "powered" confirmation
+    watchdog::begin();      // record boot time, log previous reset reason
     display::begin();
     net_wifi::begin();
     net_mqtt::begin();
@@ -49,6 +51,7 @@ void loop() {
     net_mqtt::loop();
     display::loop();
     heartbeat::loop();
+    watchdog::loop();
     periodicStateDump();
 
     // Yield to the ESP8266 background tasks (WiFi stack, lwIP).

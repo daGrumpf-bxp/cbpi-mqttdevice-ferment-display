@@ -21,4 +21,17 @@ void begin();
 void loop();
 bool isConnected();
 
+// Publish a status string ("online", "rebooting") on display/<name>/status.
+// Retained so observers see the current state on connect.
+void publishStatus(const char* status, bool retain);
+
+// Publish a reboot-reason on display/<name>/last_reboot_reason. Retained.
+// Used by the watchdog right before a planned restart.
+void publishLastRebootReason(const char* reason_id);
+
+// Cleanly disconnect from the broker before a deliberate reboot, so the
+// broker does NOT fire our LWT "offline" message (we already published
+// "rebooting" via publishStatus()).
+void shutdownClean();
+
 } // namespace net_mqtt

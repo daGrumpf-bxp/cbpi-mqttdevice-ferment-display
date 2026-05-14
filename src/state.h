@@ -33,6 +33,12 @@ struct State {
     // -- Connectivity --
     NetStatus net_status = NetStatus::DISCONNECTED;
 
+    // -- Hardware presence --
+    // True once the OLED has been successfully detected on the I2C bus.
+    // The firmware will retry init periodically if this is false (so the
+    // OLED can be hot-plugged at runtime without rebooting the device).
+    bool display_ready = false;
+
     // -- Fermenter identity (received from cbpi/fermenterupdate/<id>) --
     char fermenter_name[32]  = "";   // e.g. "Tornado"
     char sensor_id[32]       = "";   // e.g. "7eskHbgqTA9FNihrP6AJ59"

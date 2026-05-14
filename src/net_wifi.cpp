@@ -7,6 +7,7 @@
 #include "state.h"
 
 #include <ESP8266WiFi.h>
+#include <time.h>   // configTime, used to kick off NTP after WiFi UP
 
 namespace net_wifi {
 
@@ -28,6 +29,11 @@ static void onGotIp(const WiFiEventStationModeGotIP& evt) {
                   evt.gw.toString().c_str(),
                   evt.mask.toString().c_str());
     state::g.net_status = state::NetStatus::WIFI_OK;
+
+    // Kick off NTP sync — non-blocking, the time becomes valid in a
+    // few seconds. configTime is safe to call multiple times.
+    configTime(NTP_TZ, NTP_SERVER_1, NTP_SERVER_2);
+    Serial.printf("[wifi] NTP sync requested (tz=%s)\n", NTP_TZ);
 }
 
 static void onDisconnected(const WiFiEventStationModeDisconnected& evt) {

@@ -1,7 +1,7 @@
 # cbpi-mqttdevice-ferment-display
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Status: Phase 1](https://img.shields.io/badge/status-phase%201%20%E2%80%93%20serial%20validated-yellow)
+![Status: Phase 1](https://img.shields.io/badge/status-phase%201%20%E2%80%93%20feature%20complete-yellowgreen)
 ![Target: ESP8266](https://img.shields.io/badge/target-Wemos%20D1%20mini-green)
 ![Server: CBPi4](https://img.shields.io/badge/server-CraftBeerPi4-orange)
 
@@ -104,6 +104,40 @@ A high-level overview is in [ARCHITECTURE.md](ARCHITECTURE.md). In short:
 
 The entire firmware is non-blocking (no `delay()`, no `while(!connected)`), event-driven, and survives WiFi/MQTT outages cleanly.
 
+An applicative watchdog reboots the device if no fresh MQTT data is received for 181 seconds (= 3 × CBPi4 heartbeat + 1s margin), and performs a preventive reboot every day at 04:00 local time (NTP-synced) to clear any slow memory leaks. Both reboot causes are published on MQTT before restarting, so observers can distinguish a planned restart from a crash. See [External monitoring](#external-monitoring-home-assistant-node-red-etc) below.
+
+---
+
+## External monitoring (Home Assistant, Node-RED, etc.)
+
+The firmware publishes its own state via MQTT, so anything that can speak MQTT can monitor it. Useful topics:
+
+| Topic | Retained | Values | When published |
+|---|---|---|---|
+| `display/<DEVICE_NAME>/status` | yes | `online` | After every successful MQTT connect |
+| `display/<DEVICE_NAME>/status` | yes | `rebooting` | Before a planned reboot (data-stale or daily) |
+| `display/<DEVICE_NAME>/status` | yes | `offline` | Auto-published by the broker (LWT) on TCP drop = crash |
+| `display/<DEVICE_NAME>/last_reboot_reason` | yes | `data_stale`, `daily` | Right before a planned reboot |
+
+To check device state from a shell:
+
+```bash
+mosquitto_sub -h <broker> -v -t 'display/+/status' -t 'display/+/last_reboot_reason' --retained-only
+```
+
+Output example, healthy device:
+```
+display/ferm-tornado/status               online
+display/ferm-tornado/last_reboot_reason   daily
+```
+
+Output, device crashed:
+```
+display/ferm-tornado/status               offline   ← LWT fired, investigate
+```
+
+This makes it trivial to integrate later with notification systems (Telegram via Node-RED, Home Assistant alerts, etc.) without firmware changes.
+
 ---
 
 ## Project layout
@@ -125,7 +159,8 @@ The entire firmware is non-blocking (no `delay()`, no `while(!connected)`), even
 │   ├── net_wifi.{h,cpp}    non-blocking WiFi with event handlers
 │   ├── net_mqtt.{h,cpp}    async MQTT with dynamic subscription tracking
 │   ├── display.{h,cpp}     OLED rendering via U8g2
-│   └── heartbeat.{h,cpp}   LED status patterns + activity pulses
+│   ├── heartbeat.{h,cpp}   LED status patterns + activity pulses
+│   └── watchdog.{h,cpp}    "let it crash" applicative watchdog + LWT
 └── test/
     ├── Makefile            `make test` to run host-side parser tests
     ├── test_main.cpp       29 unit tests against real CBPi4 payloads
@@ -184,6 +219,25 @@ Means no `fermenterupdate` or `sensordata` arrived in the last 90s. Check:
 - CBPi4 is running, MQTT is enabled (`mqtt: True` in `config.yaml`)
 - Broker is healthy: `systemctl status mosquitto`
 
+### OLED screen blank / `[disp] no I2C ACK at 0x3C`
+
+The firmware probes the I²C bus at boot and retries every 5s. If you see `no I2C ACK at 0x3C (err=N) — wiring/power?` repeating in serial:
+
+| err | Meaning | Most likely cause |
+|---:|---|---|
+| 1 | data too long for transmit buffer | Library/code bug — shouldn't happen for a zero-byte probe |
+| 2 | NACK on transmit of address | OLED not responding — wrong address (try 0x3D), or wiring fault |
+| 3 | NACK on transmit of data | Wiring intermittent, capacitive interference |
+| 4 | other error | Bus held low — short, wrong pin, dead chip |
+
+Diagnostic steps in order:
+1. **Check the address jumper on the back of the OLED** — some modules ship as 0x3D. Update `OLED_I2C_ADDR` in `include/config.h`.
+2. **Reseat the dupont wires** — particularly SDA/SCL. Dupont contacts loosen over time, especially after a few months of bench use.
+3. **Check VCC is on 3V3, not 5V** — some OLED modules don't tolerate 5V on their logic side.
+4. **Add a 100 µF capacitor between VCC and GND of the OLED** — the SSD1306 controller is sensitive to brown-outs during WiFi TX bursts on the D1 mini.
+5. **Try lowering the I²C clock** in `config.h`: `#define I2C_CLOCK_HZ 50000UL` (50 kHz). Helps with long or noisy cables.
+6. **Swap the OLED** with a known-good unit if you have one. The hot-plug retry means you can plug a new OLED in while the device runs and you'll see `[disp] OLED recovered after retry` once it's detected.
+
 ### Tests fail locally
 
 ```bash
@@ -204,7 +258,11 @@ If a test fails, your local CBPi4 might emit a slightly different payload than w
 - [x] Onboard LED status patterns
 - [x] SSD1306 128×64 rendering via U8g2
 - [x] Host-side unit tests (29 cases against real CBPi4 payloads)
-- [ ] Field test on real fermenter (Tornado)
+- [x] OLED hot-plug detection (I²C ACK probe + retry every 5s)
+- [x] Applicative watchdog (data-stale + daily wall-clock reboot)
+- [x] NTP sync (France TZ with DST)
+- [x] MQTT LWT (online / rebooting / offline) for external observability
+- [ ] Field test on real fermenter (Tornado) over multiple days
 - [ ] 3D-printed enclosure (front plate STL)
 
 ### Phase 2 — ESP32 + TFT + encoder

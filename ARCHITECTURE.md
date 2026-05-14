@@ -84,8 +84,9 @@ Code lives in `src/`, headers in `src/` (Arduino convention) and `include/` (con
 | `net_mqtt.h/.cpp` | ~210 | Non-blocking async MQTT (AsyncMqttClient) with dynamic subscription tracking — see [Discovery dance](#discovery-dance). |
 | `display.h/.cpp` | ~165 | OLED rendering via U8g2. Throttled to 500ms. Designed to be replaceable for Phase 2 TFT. |
 | `heartbeat.h/.cpp` | ~130 | Onboard LED status patterns (BOOT/NO_WIFI/NO_MQTT/READY) with activity pulses on MQTT messages. |
+| `watchdog.h/.cpp` | ~120 | "Let it crash" applicative watchdog. Reboots on prolonged MQTT silence (181s) or daily at 04:00 local. Publishes intent + reason via MQTT LWT before restarting. |
 
-Total: ~1100 lines of code + ~270 lines of tests + ~350 lines of doc.
+Total: ~1300 lines of code + ~280 lines of tests + ~400 lines of doc.
 
 ---
 
@@ -295,11 +296,66 @@ Subscription pattern is therefore a **two-stage dance**:
 
 If `actor_id` changes (CBPi reconfig), the dance restarts naturally.
 
-### Decision: `DATA_STALE_MS = 90 seconds`
+### Decision: applicative watchdog with "let it crash" philosophy
 
-CBPi pushes `fermenterupdate` at two cadences: ~1s on events, plus a periodic heartbeat every 60s (`MQTTUpdate` setting). So in steady state, the worst case between two fermenter messages is 60s.
+Considered: a sophisticated 3-pronged watchdog watching WiFi, MQTT, and data freshness independently, with degraded modes and graceful recovery on each axis.
 
-We pad that to 90s (60s + 30s margin) before showing a "stale" warning. Below 60s would flag false positives on every quiet minute; above 120s would hide real outages too long.
+Rejected because **all three failure modes converge to the same observable**: no fresh MQTT data arriving. WiFi down → no MQTT data. MQTT broker down → no MQTT data. CBPi4 crashed → no MQTT data. So three watchdogs are three implementations of one truth. The simpler model — "if I haven't heard fresh data for 3 × CBPi4 heartbeats, reboot" — covers all the cases the complex version would have, with a fraction of the code.
+
+This works because the device is **idempotent**:
+- CBPi4 is the source of truth, this device just displays
+- Reboot brings the system to a known-good state in ~3 seconds
+- No state is lost on reboot (everything will be re-discovered from MQTT)
+
+So "let it crash" makes sense here in a way it wouldn't for, e.g., a brewing controller that holds setpoints and PID state.
+
+**Parameters chosen**:
+- `WDT_DATA_STALE_MS = 181 seconds` = 3 × CBPi4 heartbeat (60s) + 1 second margin. Three full cycles without a single message is unambiguous: something is broken upstream.
+- `WDT_MIN_UPTIME_MS = 5 minutes` grace period. Prevents flapping reboot loops if the device boots into a misconfigured network.
+- `WDT_DAILY_REBOOT_HOUR = 04:00` local time. NTP-anchored, not uptime-anchored. Never lands during a brewing session because 4am is brewer's sleep time.
+
+**Why the daily reboot exists**: long-running ESP8266 firmwares are vulnerable to slow lwIP memory leaks, retained socket state weirdness, and other gremlins that accumulate over weeks. A clean daily reboot mitigates all of them at the cost of ~5 seconds of downtime at a chosen time.
+
+### Decision: MQTT Last Will & Testament for external observability
+
+The watchdog publishes its reboot intent via MQTT before calling `ESP.restart()`. Three observable states result:
+- `online` (retained) — published right after MQTT connect succeeds. External observers see this and know we're alive.
+- `rebooting` (retained) — published deliberately before a planned reboot. Observer sees this and knows the upcoming downtime is expected.
+- `offline` (retained, set by broker) — fires only when the broker detects we dropped TCP without a clean DISCONNECT, i.e. when we genuinely crashed.
+
+Topics:
+- `display/<DEVICE_NAME>/status` — current state (online/rebooting/offline)
+- `display/<DEVICE_NAME>/last_reboot_reason` (retained) — `data_stale` or `daily`, so post-mortem is possible
+
+This gives a clean separation between **expected restarts** (we know about them) and **crashes** (we don't). CBPi4 doesn't natively monitor incoming MQTT, but Home Assistant, Node-RED, or a simple `mosquitto_sub` watcher can be added later without firmware changes.
+
+### Decision: NTP sync triggered on WiFi GotIP, not in a dedicated module
+
+The watchdog's daily-reboot feature needs wall-clock time, which means NTP. Considered creating a `net_time.{h,cpp}` module to encapsulate this; rejected because it's literally one function call (`configTime`) and the natural trigger point is when WiFi gets its IP — which is in `net_wifi.cpp`'s `onGotIp` callback already.
+
+```cpp
+static void onGotIp(...) {
+    state::g.net_status = state::NetStatus::WIFI_OK;
+    configTime(NTP_TZ, NTP_SERVER_1, NTP_SERVER_2);
+}
+```
+
+`configTime` is non-blocking — it just kicks off a background sync. The local time becomes valid after a few seconds. The watchdog's daily-reboot logic checks this explicitly before considering the wall-clock hour valid:
+
+```cpp
+time_t now_t = time(nullptr);
+if (now_t < 1577836800UL /* 2020-01-01 */) return;  // not synced yet
+```
+
+The POSIX TZ string `CET-1CEST,M3.5.0,M10.5.0/3` handles DST automatically for France/Europe, so no code changes needed twice a year.
+
+### Decision: `DATA_STALE_MS = 90 seconds` (display warning, distinct from watchdog)
+
+`DATA_STALE_MS` is for the **display layer**, NOT the watchdog. They're related but separate:
+- `DATA_STALE_MS = 90s` triggers a visible `!` warning on the OLED. Tells the operator that something might be off.
+- `WDT_DATA_STALE_MS = 181s` triggers a reboot. Tells the firmware to give up and restart.
+
+The 90s threshold for the display warning was chosen because CBPi pushes `fermenterupdate` at two cadences: ~1s on events, plus a periodic heartbeat every 60s. So in steady state, the worst case between two fermenter messages is 60s. We pad to 90s (60s + 30s margin) before showing the warning. Below 60s would flag false positives on every quiet minute; above 120s would hide real outages too long.
 
 ### Decision: single header `secrets.h` (gitignored)
 

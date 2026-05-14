@@ -135,18 +135,72 @@ static void drawBootScreen() {
     s_u8g2.drawStr(0,  34, nets);
 }
 
-// ---- public API ------------------------------------------------------------
-void begin() {
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-    s_u8g2.setI2CAddress(OLED_I2C_ADDR << 1);  // U8g2 expects shifted addr
+// ---- I2C presence probe ----------------------------------------------------
+// Send a zero-length write to OLED_I2C_ADDR. Returns 0 if the device ACKs
+// (=present), non-zero otherwise. Doesn't depend on U8g2 — pure Wire.
+//
+// Why this matters: U8g2's begin() does not reliably return false if the
+// display is missing (signature varies across versions/clones). The Wire
+// transmit ACK is the only portable way to know if anything is on the bus.
+static int probeI2C(uint8_t addr) {
+    Wire.beginTransmission(addr);
+    return Wire.endTransmission();  // 0 = ACK, others = NACK/timeout/error
+}
+
+// ---- Init state ------------------------------------------------------------
+// We track whether the display was initialised successfully. If not, we
+// keep trying every DISPLAY_RETRY_MS so that hot-plugging the OLED while
+// the device is running will eventually pick it up.
+static bool     s_display_ready    = false;
+static uint32_t s_last_retry_ms    = 0;
+static constexpr uint32_t DISPLAY_RETRY_MS = 5000;
+
+// Try to initialise the OLED. Returns true on success.
+static bool tryInit() {
+    const int err = probeI2C(OLED_I2C_ADDR);
+    if (err != 0) {
+        Serial.printf("[disp] no I2C ACK at 0x%02X (err=%d) — wiring/power?\n",
+                      OLED_I2C_ADDR, err);
+        return false;
+    }
+    s_u8g2.setI2CAddress(OLED_I2C_ADDR << 1);
     s_u8g2.begin();
     s_u8g2.setFontMode(0);
     s_u8g2.setDrawColor(1);
-    Serial.println("[disp] SSD1306 init OK");
+    // Quick self-test: send a clear+flush. If the bus is flaky this is
+    // where it shows up.
+    s_u8g2.clearBuffer();
+    s_u8g2.sendBuffer();
+    Serial.printf("[disp] SSD1306 init OK at 0x%02X\n", OLED_I2C_ADDR);
+    return true;
+}
+
+// ---- public API ------------------------------------------------------------
+void begin() {
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(I2C_CLOCK_HZ);   // explicit, see config.h
+
+    s_display_ready = tryInit();
+    s_last_retry_ms = millis();
+    state::g.display_ready = s_display_ready;
 }
 
 void loop() {
     const uint32_t now = millis();
+
+    // Retry init if we don't have the display yet.
+    if (!s_display_ready) {
+        if ((now - s_last_retry_ms) < DISPLAY_RETRY_MS) return;
+        s_last_retry_ms = now;
+        s_display_ready = tryInit();
+        state::g.display_ready = s_display_ready;
+        if (s_display_ready) {
+            Serial.println("[disp] OLED recovered after retry");
+        }
+        if (!s_display_ready) return;
+        // If we just recovered the display, fall through and render.
+    }
+
     if ((now - s_last_draw_ms) < DISPLAY_REFRESH_MS) return;
     s_last_draw_ms = now;
 

@@ -39,6 +39,12 @@ static char s_sub_heater_raw[64] = "";
 // Static topic for our fermenter (built once in begin()).
 static char s_topic_fermenter[96] = "";
 
+// LWT topics (built once in begin()):
+//   s_topic_status  = "display/<DEVICE_NAME>/status"
+//   s_topic_last_rb = "display/<DEVICE_NAME>/last_reboot_reason"
+static char s_topic_status[64]  = "";
+static char s_topic_last_rb[80] = "";
+
 // ---- forward declarations --------------------------------------------------
 static void onMqttConnect(bool sessionPresent);
 static void onMqttDisconnect(AsyncMqttClientDisconnectReason reason);
@@ -136,6 +142,10 @@ static void onMqttConnect(bool sessionPresent) {
     Serial.printf("[mqtt] connected (session_present=%d)\n", sessionPresent);
     state::g.net_status = state::NetStatus::MQTT_OK;
 
+    // Tell observers we're alive — retained so anyone who subscribes
+    // later still sees us as online.
+    s_client.publish(s_topic_status, 0, /*retain=*/true, LWT_PAYLOAD_ONLINE);
+
     // Subscribe to the static fermenter topic.
     Serial.printf("[mqtt] subscribe   %s\n", s_topic_fermenter);
     s_client.subscribe(s_topic_fermenter, 0);
@@ -211,8 +221,16 @@ void begin() {
     buildTopic(s_topic_fermenter, sizeof(s_topic_fermenter),
                CBPI_TOPIC_FERMENTER_UPDATE, FERMENTER_ID);
 
+    // LWT topics: display/<DEVICE_NAME>/status
+    //             display/<DEVICE_NAME>/last_reboot_reason
+    snprintf(s_topic_status, sizeof(s_topic_status),
+             "%s%s%s", LWT_TOPIC_PREFIX, DEVICE_NAME, LWT_TOPIC_SUFFIX);
+    snprintf(s_topic_last_rb, sizeof(s_topic_last_rb),
+             "%s%s%s", LWT_TOPIC_PREFIX, DEVICE_NAME, LWT_LAST_REBOOT_SUFFIX);
+
     Serial.printf("[mqtt] init broker=%s:%d device=%s\n",
                   MQTT_HOST, MQTT_PORT, DEVICE_NAME);
+    Serial.printf("[mqtt] LWT topic: %s\n", s_topic_status);
 
     s_client.onConnect(onMqttConnect);
     s_client.onDisconnect(onMqttDisconnect);
@@ -222,6 +240,11 @@ void begin() {
     s_client.setServer(MQTT_HOST, MQTT_PORT);
     s_client.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
     s_client.setClientId(DEVICE_NAME);
+
+    // Last Will & Testament: broker will publish "offline" retained on
+    // s_topic_status if we drop without a clean DISCONNECT (= crash).
+    // Signature: setWill(topic, qos, retain, payload)
+    s_client.setWill(s_topic_status, 0, true, LWT_PAYLOAD_OFFLINE);
     if (MQTT_USER[0] != '\0') {
         s_client.setCredentials(MQTT_USER, MQTT_PASS);
     }
@@ -248,6 +271,31 @@ void loop() {
 
 bool isConnected() {
     return s_client.connected();
+}
+
+// ---- public API for the watchdog -------------------------------------------
+void publishStatus(const char* status, bool retain) {
+    if (!s_client.connected()) {
+        Serial.printf("[mqtt] publishStatus(%s) skipped: not connected\n",
+                      status);
+        return;
+    }
+    s_client.publish(s_topic_status, 0, retain, status);
+}
+
+void publishLastRebootReason(const char* reason_id) {
+    if (!s_client.connected()) return;
+    s_client.publish(s_topic_last_rb, 0, /*retain=*/true, reason_id);
+}
+
+void shutdownClean() {
+    // A clean DISCONNECT to the broker means the broker will NOT fire our
+    // LWT "offline" message. The caller is expected to have published
+    // "rebooting" already via publishStatus().
+    s_want_connected = false;
+    if (s_client.connected()) {
+        s_client.disconnect();
+    }
 }
 
 } // namespace net_mqtt

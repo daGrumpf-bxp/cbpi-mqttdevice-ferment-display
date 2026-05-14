@@ -30,10 +30,11 @@ void dump() {
                   g.current_temp, g.target_temp,
                   g.mode == Mode::AUTO ? "AUTO" : "OFF",
                   g.in_range ? 1 : 0);
-    Serial.printf("[state] cooler=%s heater=%s stale=%d\n",
+    Serial.printf("[state] cooler=%s heater=%s stale=%d display=%s\n",
                   g.cooler_on ? "ON" : "off",
                   g.heater_on ? "ON" : "off",
-                  isStale() ? 1 : 0);
+                  isStale() ? 1 : 0,
+                  g.display_ready ? "ok" : "MISSING");
 }
 
 } // namespace state
