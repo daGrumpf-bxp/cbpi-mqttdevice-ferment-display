@@ -1,7 +1,7 @@
 # cbpi-mqttdevice-ferment-display
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Status: Phase 1](https://img.shields.io/badge/status-phase%201%20%E2%80%93%20feature%20complete-yellowgreen)
+![Status: Phase 1](https://img.shields.io/badge/status-phase%201%20%E2%80%93%20hardware%20validated-brightgreen)
 ![Target: ESP8266](https://img.shields.io/badge/target-Wemos%20D1%20mini-green)
 ![Server: CBPi4](https://img.shields.io/badge/server-CraftBeerPi4-orange)
 
@@ -14,30 +14,43 @@ Wall-mounted display next to a fermenter, driven by [CraftBeerPi4](https://githu
 
 ## What it shows
 
-Display layout on 128×64 OLED (Phase 1):
+Four real-world states the display surfaces, photographed from a working Wemos D1 mini + SSD1306 setup:
+
+| State | Photo | Meaning |
+|---|---|---|
+| **OFF** | ![OFF](docs/images/oled_state_off.jpg) | Fermenter not regulating. Cooler relay off. Nothing's happening — explicitly. |
+| **AUTO idle** | ![AUTO idle](docs/images/oled_state_auto_idle.jpg) | CBPi regulates. Current T° is at or below target, so the cooler stays off. The system is "armed but quiet". |
+| **AUTO cooling** | ![AUTO cooling](docs/images/oled_state_auto_cooling.jpg) | CBPi regulates. Current T° is above target (here: target dropped to 2.0°C for demo) — cooler is energized, hysteresis loop active. |
+| **MANUAL** | ![MANUAL](docs/images/oled_state_manual.jpg) | Fermenter regulation is OFF, but a relay is energized anyway — meaning someone forced it on via the CBPi UI actor controls, bypassing the fermenter logic. Surfaced explicitly so operators don't assume "OFF means nothing's running". |
+
+### Layout breakdown
 
 ```
 +--------------------------------+
-| Tornado          WIFI MQTT     |  fermenter name + connectivity status
+| Tornado          WIFI MQTT     |  fermenter name (top-left)
+|                                |  connectivity status (top-right):
+|                                |    WIFI  = associated to AP, got IP
+|                                |    MQTT  = connected to broker, subscribed
 |--------------------------------|
 |                                |
-|   14.4   °C   ->   25.0        |  current T° → target T° (large, readable @ 2-3m)
+|   11.6   °C   ->   20.0        |  current temp -> target temp
+|                                |  (-- shown if value not yet known)
 |                                |
 |--------------------------------|
-|  not cool             AUTO     |  cooler relay state · regulation mode
+|  not cool             AUTO     |  cooler/heater state · regulation mode
 +--------------------------------+
 ```
 
-The bottom-right status field shows one of:
-- **`AUTO`** — CBPi is regulating (fermenter.state = true)
-- **`MANUAL`** — CBPi is not regulating but a relay is forced on from the actor UI directly. Important to surface so operators don't assume "OFF means nothing's running".
-- **`OFF`** — everything idle, no regulation, no manual override
+**Bottom-right status field** is computed live from CBPi4 state:
+- **`AUTO`** — `fermenter.state == true` (CBPi regulating per hysteresis)
+- **`MANUAL`** — `fermenter.state == false` but cooler or heater is energized (someone overrode)
+- **`OFF`** — everything idle
 
-The cooler/heater field uses verbose lowercase/uppercase to avoid misreading:
+**Cooler/heater label** uses verbose case to avoid misreading at a glance:
 - `not cool` / `COOLING *` (relay off / on)
 - `not heat` / `HEATING *` (when a heater is configured)
 
-A `!` to the right of the target temperature signals stale data (>90s with no update from CBPi4 — typically indicates the server or broker is down).
+**Stale indicator**: a `!` to the right of the target temperature signals stale data (>90s with no update from CBPi4 — typically indicates the server or broker is down). The applicative watchdog will reboot the device automatically if this persists past 181 seconds.
 
 The onboard blue LED gives status at a glance, **without needing to look at the screen or serial**:
 
@@ -210,6 +223,8 @@ A device running months on end without the daily reboot is fine in practice — 
     ├── test_main.cpp       29 unit tests against real CBPi4 payloads
     ├── Arduino.{h,cpp}     minimal Arduino stub for host build
     └── README.md
+docs/
+└── images/                  README screenshots (real OLED photos)
 ```
 
 ---
@@ -306,7 +321,8 @@ If a test fails, your local CBPi4 might emit a slightly different payload than w
 - [x] Applicative watchdog (data-stale + daily wall-clock reboot)
 - [x] NTP sync (France TZ with DST)
 - [x] MQTT LWT (online / rebooting / offline) for external observability
-- [ ] Field test on real fermenter (Tornado) over multiple days
+- [x] Field test on real fermenter (Tornado) — 4 states validated (OFF, AUTO idle, AUTO cooling, MANUAL)
+- [ ] Field test over multiple days (long-term stability)
 - [ ] 3D-printed enclosure (front plate STL)
 
 ### Phase 2 — ESP32 + TFT + encoder
