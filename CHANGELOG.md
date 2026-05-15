@@ -4,7 +4,11 @@ All notable changes to this project. Format based on [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Fixed
+- **Watchdog reboot reason was lost when MQTT was unreachable.** The data-stale watchdog fires precisely when MQTT is unreachable (otherwise messages would keep arriving and reset the stale timer), so `publishRebootIntent()` was silently skipping publishes ("publishStatus skipped: not connected") and the device looked indistinguishable from a brutal crash on the broker side. Fixed by persisting the reboot reason in ESP8266 RTC user memory (12 bytes, survives software reset as long as power is maintained). At the next boot, after MQTT reconnects, the recovered reason is published retained on `display/<DEVICE_NAME>/last_reboot_reason`. Daily reboots (where MQTT is usually still up) publish via both paths — immediate MQTT for live observers, RTC fallback for resilience.
+
 ### Added
+- `watchdog::flushPendingMqtt()` — called by `net_mqtt` after MQTT connects to publish a recovered RTC-persisted reboot reason.
 - **Closed-LAN deployment support**:
   - `NTP_SERVER_1`, `NTP_SERVER_2`, `NTP_TZ` can be overridden in `secrets.h` to point at local time sources (typical on industrial networks).
   - `WDT_DAILY_REBOOT_ENABLED` flag — set to `0` in `secrets.h` to disable the daily preventive reboot entirely (for deployments where NTP truly isn't available or wanted).
@@ -14,11 +18,15 @@ All notable changes to this project. Format based on [Keep a Changelog](https://
   - Vertical-chevron-looking arrow glyph → plain `->` horizontal arrow (was ambiguous: looked like "heat up" symbol)
   - `cool` / `COOL *` → `not cool` / `COOLING *` (verb-form labels, harder to misread)
   - New `MANUAL` mode label, shown when fermenter.state is OFF but a relay is actually energized (= someone forced the actor on via CBPi UI bypassing fermenter logic). Important to surface so operators don't assume "OFF means safe / nothing's running".
+- **Documentation polish**:
+  - 4 real OLED photos in `docs/images/` (OFF / AUTO idle / AUTO cooling / MANUAL states), embedded in README.
+  - Hardware-validated status badge.
+  - Closed-LAN deployment section in README with dependencies table.
 
 ### Why
 Pierre's first field deployment will be in a brewery LAN with limited or controlled outbound traffic. NTP was hard-coded to public servers (`pool.ntp.org`) which would silently fail and silently disable the daily reboot — bad ergonomics for closed-LAN. Making it explicit and configurable is a 30-line change that opens up real production deployment.
 
-Display labels were ambiguous: `W M` could be anything (Watts? Megahertz?), `▲ 25.0` looked like "heating up", `cool` next to `OFF` could be misread as "currently cooling". All four label changes are zero-cost ergonomics improvements based on direct user feedback.
+The watchdog-vs-MQTT bug was caught during real field testing: after a 3-minute mosquitto outage, the device rebooted but published nothing — looking exactly like a crash. RTC persistence is the textbook fix and brings observability parity with healthy reboots.
 
 ## [0.7.0] — 2026-05-15
 

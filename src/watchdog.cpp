@@ -11,6 +11,72 @@
 
 namespace watchdog {
 
+// ---- RTC memory persistence for reboot reason ------------------------------
+// Problem: the data-stale watchdog fires precisely when MQTT is unreachable
+// (otherwise messages would keep arriving and reset the stale timer). So we
+// can't publish "rebooting" or last_reboot_reason at the moment of reboot —
+// the broker is unreachable.
+//
+// Solution: stash the reason in ESP8266 RTC memory (512 bytes that survive
+// software reset as long as power is maintained). At the next boot, after
+// MQTT reconnects, we read this and publish the reason retained.
+//
+// Layout: 4 bytes magic + 4 bytes enum + 4 bytes inverted-magic checksum
+// = 12 bytes total, well under the 512-byte limit. Triple-redundant magic
+// helps distinguish "we wrote this" from "RTC contained garbage from boot".
+//
+// RTC layout is byte-addressed but read/write in 4-byte words.
+struct RtcRebootInfo {
+    uint32_t magic;        // = 0xCAFEBABE if written by us
+    uint32_t reason;       // RebootReason cast to uint32
+    uint32_t magic_inv;    // = ~magic, integrity check
+};
+static_assert(sizeof(RtcRebootInfo) == 12, "RtcRebootInfo must be 12 bytes");
+
+static constexpr uint32_t RTC_MAGIC      = 0xCAFEBABEUL;
+static constexpr uint32_t RTC_OFFSET_BYTES = 64;  // skip first 64 bytes for
+                                                  // safety (other libs may
+                                                  // use the low addresses)
+
+static bool s_pending_publish = false;   // true at boot if RTC had a reason
+static RebootReason s_pending_reason = RebootReason::DATA_STALE;
+
+// Store reason in RTC and clear it.
+static void rtcStoreReason(RebootReason r) {
+    RtcRebootInfo info;
+    info.magic     = RTC_MAGIC;
+    info.reason    = static_cast<uint32_t>(r);
+    info.magic_inv = ~RTC_MAGIC;
+    ESP.rtcUserMemoryWrite(RTC_OFFSET_BYTES / 4,
+                           reinterpret_cast<uint32_t*>(&info),
+                           sizeof(info));
+}
+
+// Try to read a previously-stored reason. Returns true if a valid record
+// existed, and *out_reason is set. Always clears the slot after reading
+// so subsequent boots won't see stale data.
+static bool rtcReadAndClearReason(RebootReason* out_reason) {
+    RtcRebootInfo info;
+    if (!ESP.rtcUserMemoryRead(RTC_OFFSET_BYTES / 4,
+                               reinterpret_cast<uint32_t*>(&info),
+                               sizeof(info))) {
+        return false;
+    }
+    const bool valid = (info.magic == RTC_MAGIC)
+                    && (info.magic_inv == ~RTC_MAGIC)
+                    && (info.reason <= static_cast<uint32_t>(RebootReason::DAILY));
+    if (valid) {
+        *out_reason = static_cast<RebootReason>(info.reason);
+    }
+    // Always clear (write zeros) so we don't keep seeing the same reason
+    // on subsequent boots.
+    info.magic = info.magic_inv = info.reason = 0;
+    ESP.rtcUserMemoryWrite(RTC_OFFSET_BYTES / 4,
+                           reinterpret_cast<uint32_t*>(&info),
+                           sizeof(info));
+    return valid;
+}
+
 // ---- module state ----------------------------------------------------------
 static uint32_t s_boot_ms             = 0;
 static int      s_last_daily_check_day = -1;  // -1 = never checked yet
@@ -59,12 +125,42 @@ void begin() {
     s_boot_ms = millis();
     Serial.printf("[wdt] init, last_reset=%s (\"%s\")\n",
                   lastResetReasonId(), ESP.getResetReason().c_str());
+
+    // Did we leave a reboot reason in RTC memory before the last restart?
+    // If so, we'll publish it once MQTT is connected — see flushPending().
+    RebootReason r;
+    if (rtcReadAndClearReason(&r)) {
+        s_pending_publish = true;
+        s_pending_reason  = r;
+        Serial.printf("[wdt] previous reboot reason recovered from RTC: %s\n",
+                      reasonStr(r));
+    }
 }
 
 void publishRebootIntent(RebootReason reason) {
-    Serial.printf("[wdt] publishing reboot intent: %s\n", reasonStr(reason));
+    Serial.printf("[wdt] saving reboot intent to RTC: %s\n", reasonStr(reason));
+
+    // ALWAYS persist to RTC first — works even when MQTT is unreachable
+    // (which is the common case for DATA_STALE reboots).
+    rtcStoreReason(reason);
+
+    // ALSO try to publish over MQTT right now. If we're still connected
+    // (typical for DAILY reboot), the broker sees "rebooting" immediately
+    // and a Home Assistant observer can distinguish planned vs crash.
+    // If MQTT is down (typical for DATA_STALE), these calls silently skip
+    // — the RTC-persisted reason will be published at the next boot.
     net_mqtt::publishStatus(LWT_PAYLOAD_REBOOTING, /*retain=*/true);
     net_mqtt::publishLastRebootReason(reasonStr(reason));
+}
+
+// Called by the MQTT module when a connection succeeds, to flush any
+// pending reboot reason recovered from RTC at boot.
+void flushPendingMqtt() {
+    if (!s_pending_publish) return;
+    s_pending_publish = false;
+    Serial.printf("[wdt] publishing recovered reboot reason: %s\n",
+                  reasonStr(s_pending_reason));
+    net_mqtt::publishLastRebootReason(reasonStr(s_pending_reason));
 }
 
 void loop() {

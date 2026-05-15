@@ -31,6 +31,11 @@ enum class RebootReason : uint8_t {
 void begin();
 void loop();
 
+// Called by net_mqtt when a connection becomes established. Publishes any
+// reboot reason that was persisted to RTC before a previous restart.
+// Safe to call multiple times — no-op after the first successful flush.
+void flushPendingMqtt();
+
 // Called by net_mqtt right before a deliberate ESP.restart(), so we can
 // publish "rebooting" cleanly on MQTT.
 void publishRebootIntent(RebootReason reason);

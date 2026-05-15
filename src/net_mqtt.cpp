@@ -8,6 +8,7 @@
 #include "state.h"
 #include "cbpi_proto.h"
 #include "heartbeat.h"
+#include "watchdog.h"
 
 #include <AsyncMqttClient.h>
 
@@ -145,6 +146,10 @@ static void onMqttConnect(bool sessionPresent) {
     // Tell observers we're alive — retained so anyone who subscribes
     // later still sees us as online.
     s_client.publish(s_topic_status, 0, /*retain=*/true, LWT_PAYLOAD_ONLINE);
+
+    // If the previous boot left a reboot reason in RTC (typically because
+    // it rebooted while MQTT was down), publish it now retained.
+    watchdog::flushPendingMqtt();
 
     // Subscribe to the static fermenter topic.
     Serial.printf("[mqtt] subscribe   %s\n", s_topic_fermenter);
