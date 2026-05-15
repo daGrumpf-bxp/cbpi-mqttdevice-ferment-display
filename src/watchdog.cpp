@@ -15,6 +15,10 @@ namespace watchdog {
 static uint32_t s_boot_ms             = 0;
 static int      s_last_daily_check_day = -1;  // -1 = never checked yet
 
+// One-shot warning if NTP hasn't synced within NTP_SYNC_WARN_MS of boot.
+// Only fires once per boot. Doesn't affect operation, just logs.
+static bool     s_ntp_warned          = false;
+
 // Convert RebootReason to a stable string for MQTT publishing and logs.
 static const char* reasonStr(RebootReason r) {
     switch (r) {
@@ -67,6 +71,29 @@ void loop() {
     const uint32_t now    = millis();
     const uint32_t uptime = now - s_boot_ms;
 
+    // One-shot NTP warning: if we've been up long enough but NTP still
+    // hasn't given us a valid clock, log it once. This makes "closed LAN"
+    // deployments visible in the serial output instead of silently
+    // disabling the daily-reboot feature.
+    if (!s_ntp_warned && uptime > NTP_SYNC_WARN_MS) {
+        s_ntp_warned = true;
+        time_t now_t = time(nullptr);
+        if (now_t < 1577836800UL /* 2020-01-01 */) {
+            Serial.printf("[wdt] WARNING: NTP not synced after %lu ms uptime — "
+                          "daily reboot %s. Check NTP server reachability or "
+                          "set NTP_SERVER_1 to a local time source.\n",
+                          (unsigned long)uptime,
+#if WDT_DAILY_REBOOT_ENABLED
+                          "disabled until sync"
+#else
+                          "explicitly disabled in secrets.h"
+#endif
+                          );
+        } else {
+            Serial.printf("[wdt] NTP synced, local time available\n");
+        }
+    }
+
     // 1. Grace period: never reboot before MIN_UPTIME_MS.
     if (uptime < WDT_MIN_UPTIME_MS) return;
 
@@ -86,8 +113,10 @@ void loop() {
         }
     }
 
-    // 3. Daily preventive reboot — only if NTP has actually given us a
-    //    valid local time. Before the year 2000, time isn't synced yet.
+    // 3. Daily preventive reboot — only if enabled, and only if NTP has
+    //    actually given us a valid local time. Before the year 2000, time
+    //    isn't synced yet, so we silently skip.
+#if WDT_DAILY_REBOOT_ENABLED
     time_t  now_t = time(nullptr);
     if (now_t < 1577836800UL /* 2020-01-01 */) return;
 
@@ -110,6 +139,7 @@ void loop() {
         delay(200);
         ESP.restart();
     }
+#endif
 }
 
 } // namespace watchdog

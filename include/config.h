@@ -74,10 +74,37 @@
 #define WDT_DAILY_REBOOT_MIN     0
 
 // ---- NTP / time zone --------------------------------------------------
-// POSIX TZ string for France (CET/CEST, DST automatic).
-#define NTP_TZ                   "CET-1CEST,M3.5.0,M10.5.0/3"
+// NTP is used by the watchdog's daily-reboot feature. If NTP never syncs
+// (no internet, closed LAN, etc.), the firmware operates normally but the
+// daily reboot is silently disabled — only the data-stale watchdog runs.
+//
+// NTP servers can be overridden in secrets.h to point at a local time
+// source (typical for closed LAN deployments where the customer's router
+// or a PDC runs NTP). If not overridden, falls back to public servers.
+#ifndef NTP_SERVER_1
 #define NTP_SERVER_1             "pool.ntp.org"
+#endif
+#ifndef NTP_SERVER_2
 #define NTP_SERVER_2             "time.nist.gov"
+#endif
+
+// POSIX TZ string for France (CET/CEST, DST automatic).
+// Override in secrets.h for other regions, e.g.:
+//   #define NTP_TZ "UTC0"                             // pure UTC
+//   #define NTP_TZ "EST5EDT,M3.2.0,M11.1.0"           // US East
+#ifndef NTP_TZ
+#define NTP_TZ                   "CET-1CEST,M3.5.0,M10.5.0/3"
+#endif
+
+// If NTP hasn't synced after this many seconds since WiFi UP, log a
+// warning. This helps detect a misconfigured NTP server early.
+#define NTP_SYNC_WARN_MS         (60UL * 1000UL)
+
+// Set to 0 in secrets.h to disable the daily preventive reboot entirely
+// (useful if you can't or won't expose NTP to the device).
+#ifndef WDT_DAILY_REBOOT_ENABLED
+#define WDT_DAILY_REBOOT_ENABLED 1
+#endif
 
 // ---- LWT (Last Will & Testament) --------------------------------------
 // Topic where the broker publishes our online/offline status. Allows

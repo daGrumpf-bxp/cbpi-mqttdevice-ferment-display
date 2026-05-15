@@ -149,6 +149,41 @@ This makes it trivial to integrate later with notification systems (Telegram via
 
 ---
 
+## Closed-LAN / no-internet deployments
+
+The firmware was designed to work in fully isolated networks (industrial brewery LAN with no internet access, customer site behind a strict firewall, etc.). Nothing requires reaching the public Internet:
+
+| Function | Internet required? | What happens if blocked |
+|---|---|---|
+| WiFi association | No | Connects to local AP |
+| MQTT to broker | No | Connects to local IP defined in `secrets.h` |
+| CBPi4 traffic | No | Talks only to the local broker |
+| OTA updates | No | Not implemented in Phase 1 |
+| **NTP sync** | **Optionally** | **Daily reboot feature disabled, rest unaffected** |
+
+The only feature affected by lack of internet is the watchdog's daily preventive reboot, which needs wall-clock time. If NTP can't sync (no route to public NTP servers), the firmware:
+
+- Continues running normally
+- Logs a one-time warning: `[wdt] WARNING: NTP not synced after 60000 ms uptime — daily reboot disabled until sync`
+- Keeps the data-stale watchdog (the more important one) running unchanged
+
+If the customer has a local NTP server (typical on industrial networks — router, PDC, dedicated time server), point at it in `secrets.h`:
+
+```c
+#define NTP_SERVER_1   "192.168.1.1"     // your router or local time server
+#define NTP_SERVER_2   "192.168.1.2"
+```
+
+Or disable the daily reboot entirely if NTP is unavailable and you want clean serial logs:
+
+```c
+#define WDT_DAILY_REBOOT_ENABLED 0
+```
+
+A device running months on end without the daily reboot is fine in practice — the daily reboot is belt-and-suspenders insurance against slow leaks, not a fundamental requirement.
+
+---
+
 ## Project layout
 
 ```

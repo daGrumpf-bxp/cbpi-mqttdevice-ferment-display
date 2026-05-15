@@ -5,50 +5,56 @@ All notable changes to this project. Format based on [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Added
-- **Watchdog module** (`watchdog.{h,cpp}`) implementing the "let it crash" philosophy:
-  - Reboots if no fresh MQTT data is received for 181s (= 3× CBPi4 heartbeat + 1s margin). Indicates upstream failure (broker/WiFi/CBPi4 down) that we can't fix locally.
-  - Daily preventive reboot at 04:00 local wall-clock time (NTP-synced). Clears slow leaks, lwIP state weirdness. Never lands during a brewing session because wall-clock-anchored, not uptime-anchored.
-  - Grace period of 5 minutes at boot — never reboots before that, prevents flapping loops during initial WiFi/MQTT connect.
-  - Logs `ESP.getResetReason()` at boot so the previous reboot cause is preserved in serial logs.
-- **NTP sync** kicked off in `net_wifi::onGotIp()` callback. Uses `pool.ntp.org` + `time.nist.gov`, France timezone (`CET-1CEST,M3.5.0,M10.5.0/3`) with automatic DST handling.
-- **MQTT Last Will & Testament** (LWT):
-  - Topic `display/<DEVICE_NAME>/status` carries `online` / `rebooting` / `offline` (latter set by broker on TCP drop).
-  - Topic `display/<DEVICE_NAME>/last_reboot_reason` (retained) carries the cause of the previous planned reboot (`data_stale`, `daily`).
-  - Allows external monitors (Home Assistant, Node-RED) to detect device state without polling.
-- **`net_mqtt::publishStatus()`, `publishLastRebootReason()`, `shutdownClean()`** — public helpers used by the watchdog to publish state transitions and perform clean disconnects (which suppress the LWT trigger).
-
-### Changed
-- `display::begin()` now performs a real I²C ACK probe (`Wire.beginTransmission` + `Wire.endTransmission`) instead of trusting U8g2's `begin()` return value, which is unreliable across U8g2 versions and OLED clones. The serial log now distinguishes `init OK` from `no I2C ACK at 0xXX (err=N) — wiring/power?`.
-- `display::loop()` now retries init every 5 seconds if the OLED was not detected at boot. This lets you hot-plug the OLED while the device is running, instead of having to reboot. A successful recovery logs `OLED recovered after retry`.
-- `state::g.display_ready` flag added — tracks whether the OLED is currently usable. Shown in the periodic state dump (`display=ok` / `display=MISSING`).
-- `I2C_CLOCK_HZ` constant added to `config.h` (default 100 kHz). Explicit configuration helps when debugging long cable runs that need to slow down to 50 kHz.
-- `display::begin()` now performs a clear+flush self-test as part of init. If the bus is flaky, the failure shows up here rather than at the first real draw.
+- **Closed-LAN deployment support**:
+  - `NTP_SERVER_1`, `NTP_SERVER_2`, `NTP_TZ` can be overridden in `secrets.h` to point at local time sources (typical on industrial networks).
+  - `WDT_DAILY_REBOOT_ENABLED` flag — set to `0` in `secrets.h` to disable the daily preventive reboot entirely (for deployments where NTP truly isn't available or wanted).
+  - One-time NTP-not-synced warning in serial log after 60s of uptime if the clock is still invalid. Makes the "running without NTP" state visible rather than silent.
+- **Display UX polish based on field testing**:
+  - `W` / `M` connectivity icons → full `WIFI` / `MQTT` words (more readable, plenty of horizontal space)
+  - Vertical-chevron-looking arrow glyph → plain `->` horizontal arrow (was ambiguous: looked like "heat up" symbol)
+  - `cool` / `COOL *` → `not cool` / `COOLING *` (verb-form labels, harder to misread)
+  - New `MANUAL` mode label, shown when fermenter.state is OFF but a relay is actually energized (= someone forced the actor on via CBPi UI bypassing fermenter logic). Important to surface so operators don't assume "OFF means safe / nothing's running".
 
 ### Why
-v0.5 field test on Pierre's bench revealed the firmware happily logged `[disp] SSD1306 init OK` even when the OLED was missing or had a flaky wire. The actual symptom was a one-off flash at boot then nothing, with no diagnostic feedback. Probing the I²C bus directly is the only portable way to confirm a peripheral is actually there.
+Pierre's first field deployment will be in a brewery LAN with limited or controlled outbound traffic. NTP was hard-coded to public servers (`pool.ntp.org`) which would silently fail and silently disable the daily reboot — bad ergonomics for closed-LAN. Making it explicit and configurable is a 30-line change that opens up real production deployment.
 
-The watchdog adds resilience for the unattended operation case: this device will be on a wall for months, and a recoverable hang (TCP zombie connection, lwIP memory leak, etc.) should self-heal in <4 minutes rather than require a manual power cycle. The "let it crash" philosophy is appropriate here because the device is idempotent — CBPi4 is the source of truth, we just display it, so a reboot loses nothing.
+Display labels were ambiguous: `W M` could be anything (Watts? Megahertz?), `▲ 25.0` looked like "heating up", `cool` next to `OFF` could be misread as "currently cooling". All four label changes are zero-cost ergonomics improvements based on direct user feedback.
 
-## [0.5.0] — 2026-05-14
+## [0.7.0] — 2026-05-15
 
-Initial public release.
-
-Pre-release iterations (v0.1 to v0.4) were done in private during initial development against a real CraftBeerPi4 install (fermenter "Tornado"). The summary below documents what each iteration brought, to provide context for design decisions visible in the code.
+First public release. Phase 1 firmware feature-complete: stable Wemos D1 mini + SSD1306 build, field-validated against a real CBPi4 install.
 
 ### Iteration history
 
-#### v0.5 (current)
-- Bumped `DATA_STALE_MS` from 30s to 90s after observing CBPi4 publishes `fermenterupdate` at two cadences: event-driven (~1s on UI changes) plus periodic heartbeat every 60s. 30s threshold produced false-positive staleness flags between heartbeats.
-- Documented CBPi4 push cadence behaviour in README and ARCHITECTURE.
+#### v0.7 (this release)
+- **Watchdog module** (`watchdog.{h,cpp}`) implementing the "let it crash" philosophy:
+  - Reboots if no fresh MQTT data is received for 181s (= 3× CBPi4 heartbeat + 1s margin).
+  - Daily preventive reboot at 04:00 local wall-clock time (NTP-synced).
+  - Grace period of 5 minutes at boot (anti-flapping).
+  - Logs `ESP.getResetReason()` at boot for post-mortem.
+- **NTP sync** kicked off in `net_wifi::onGotIp()`, France TZ with automatic DST.
+- **MQTT Last Will & Testament** for external observability: `online`/`rebooting`/`offline` on `display/<DEVICE_NAME>/status`, reboot cause on `display/<DEVICE_NAME>/last_reboot_reason`.
+- **`net_mqtt::publishStatus()`, `publishLastRebootReason()`, `shutdownClean()`** public helpers for clean MQTT-aware reboots.
+
+#### v0.6
+- **OLED hot-plug detection**: `display::begin()` now performs a real I²C ACK probe (`Wire.beginTransmission` + `Wire.endTransmission`) instead of trusting U8g2's `begin()`. Distinguishes `init OK at 0xXX` from `no I2C ACK at 0xXX (err=N) — wiring/power?`.
+- `display::loop()` retries init every 5s if the OLED was missing at boot. Branching an OLED at runtime triggers `OLED recovered after retry`.
+- New `state::g.display_ready` flag shown in periodic dump (`display=ok` / `display=MISSING`).
+- `I2C_CLOCK_HZ = 100000` made explicit (lowerable to 50000 for noisy long cables).
+- Init now does a clear+flush self-test, so flaky-bus failures surface at boot rather than at the first draw.
+
+#### v0.5
+- Bumped `DATA_STALE_MS` from 30s to 90s after observing CBPi4 publishes `fermenterupdate` at two cadences: event-driven (~1s on UI changes) plus periodic heartbeat every 60s. 30s produced false-positive staleness flags.
+- Documented CBPi4 push cadence in README and ARCHITECTURE.
 
 #### v0.4
 - **Critical bug fix**: cooler/heater state was incorrect (showed ON while CBPi4 UI showed OFF). Root cause: `cbpi/actorupdate/*` is published with `retain=true` and its `state` field doesn't reflect real-time state during AUTO regulation. Investigated via `mosquitto_sub --retained-only` dump.
-- Rewrote actor state tracking: use `cbpi/actorupdate/<id>` only to discover `props.Topic` (the raw MQTT topic CBPi pushes to the relay bridge), then subscribe to that raw topic for real-time state. `state` field of `actorupdate` is now intentionally ignored.
+- Rewrote actor state tracking: use `cbpi/actorupdate/<id>` only to discover `props.Topic` (the raw MQTT topic CBPi pushes to the relay bridge), then subscribe to that raw topic for real-time state. `state` field of `actorupdate` is intentionally ignored.
 - Added `cbpi::parseActorRaw()` parser for the raw topic payload format (`{"state": "on"/"off"}` — string, not boolean).
 - Test suite grew from 22 to 29 cases.
 
 #### v0.3
-- Documentation pass: troubleshooting tables with action columns, "Patterns de panne fréquents" section cross-referencing LED patterns with serial codes.
+- Documentation pass: troubleshooting tables with action columns, cross-referenced LED patterns with serial codes.
 - Improved comments in `secrets.h.example` (`DEVICE_NAME`, `MQTT_USER`/`MQTT_PASS` clarified after a NOT_AUTHORIZED diagnostic).
 
 #### v0.2
@@ -64,10 +70,11 @@ Pre-release iterations (v0.1 to v0.4) were done in private during initial develo
 ### Architecture decisions (cumulative)
 
 - Built from scratch instead of forking InnuendoPi/MQTTDevice4. See [ARCHITECTURE.md → from-scratch decision](ARCHITECTURE.md#decision-from-scratch-not-a-fork-of-mqttdevice4).
-- AsyncMqttClient (event-driven) over PubSubClient (blocking). See [ARCHITECTURE.md → MQTT lib choice](ARCHITECTURE.md#decision-asyncmqttclient-over-pubsubclient).
-- U8g2 over Adafruit_SSD1306 for display. See [ARCHITECTURE.md → display lib choice](ARCHITECTURE.md#decision-u8g2-over-adafruit_ssd1306).
-- Single source of truth in `state::g`, mutated by parsers, read by display. No event queue, no observer pattern.
+- AsyncMqttClient (event-driven) over PubSubClient (blocking).
+- U8g2 over Adafruit_SSD1306 for display.
+- Single source of truth in `state::g`, mutated by parsers, read by display.
 - Host-testable parsers: `cbpi_proto.cpp` has zero Arduino dependency and is exercised by 29 unit tests on Linux without hardware.
+- "Let it crash" watchdog philosophy: this device is idempotent (CBPi4 owns state), so reboot is the cheap recovery option.
 
-[Unreleased]: https://github.com/daGrumpf-bxp/cbpi-mqttdevice-ferment-display/compare/v0.5.0...HEAD
-[0.5.0]: https://github.com/daGrumpf-bxp/cbpi-mqttdevice-ferment-display/releases/tag/v0.5.0
+[Unreleased]: https://github.com/daGrumpf-bxp/cbpi-mqttdevice-ferment-display/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/daGrumpf-bxp/cbpi-mqttdevice-ferment-display/releases/tag/v0.7.0
