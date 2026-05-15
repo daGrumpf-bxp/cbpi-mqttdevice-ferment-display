@@ -17,16 +17,25 @@ Wall-mounted display next to a fermenter, driven by [CraftBeerPi4](https://githu
 Display layout on 128×64 OLED (Phase 1):
 
 ```
-+------------------------------+
-| Tornado              W M     |   fermenter name + WiFi/MQTT status icons
-|------------------------------|
-|                              |
-|   15.9      >   25.0         |   current T° → target T° (large, readable @ 2-3m)
-|                              |
-|------------------------------|
-|  COOL *           AUTO       |   cooler relay state · regulation mode (AUTO/OFF)
-+------------------------------+
++--------------------------------+
+| Tornado          WIFI MQTT     |  fermenter name + connectivity status
+|--------------------------------|
+|                                |
+|   14.4   °C   ->   25.0        |  current T° → target T° (large, readable @ 2-3m)
+|                                |
+|--------------------------------|
+|  not cool             AUTO     |  cooler relay state · regulation mode
++--------------------------------+
 ```
+
+The bottom-right status field shows one of:
+- **`AUTO`** — CBPi is regulating (fermenter.state = true)
+- **`MANUAL`** — CBPi is not regulating but a relay is forced on from the actor UI directly. Important to surface so operators don't assume "OFF means nothing's running".
+- **`OFF`** — everything idle, no regulation, no manual override
+
+The cooler/heater field uses verbose lowercase/uppercase to avoid misreading:
+- `not cool` / `COOLING *` (relay off / on)
+- `not heat` / `HEATING *` (when a heater is configured)
 
 A `!` to the right of the target temperature signals stale data (>90s with no update from CBPi4 — typically indicates the server or broker is down).
 

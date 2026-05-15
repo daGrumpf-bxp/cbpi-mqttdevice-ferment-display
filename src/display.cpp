@@ -34,8 +34,10 @@ static uint32_t s_last_draw_ms = 0;
 
 // ---- helpers ----------------------------------------------------------------
 static void drawNetIcons() {
-    // Top-right corner: W (wifi) and M (mqtt) presence indicators.
-    // Visible if connected, hidden otherwise.
+    // Top-right corner: WIFI / MQTT presence indicators.
+    // Each appears only when the corresponding layer is up.
+    // Using full words rather than single letters — much clearer at a glance,
+    // and we have plenty of horizontal space on 128px.
     s_u8g2.setFont(u8g2_font_5x7_tf);
     using state::NetStatus;
     NetStatus s = state::g.net_status;
@@ -46,8 +48,10 @@ static void drawNetIcons() {
     const bool mqtt_ok = (s == NetStatus::MQTT_OK
                        || s == NetStatus::SUBSCRIBED);
 
-    if (wifi_ok) s_u8g2.drawStr(110, 8, "W");
-    if (mqtt_ok) s_u8g2.drawStr(120, 8, "M");
+    // "WIFI" = 4 chars × 5px = 20px, "MQTT" = 4 chars × 5px = 20px
+    // Layout: ........WIFI MQTT  (right-aligned, ending at x=128)
+    if (wifi_ok) s_u8g2.drawStr( 83, 8, "WIFI");
+    if (mqtt_ok) s_u8g2.drawStr(108, 8, "MQTT");
 }
 
 static void drawTitleBar() {
@@ -73,12 +77,14 @@ static void drawTempBlock() {
     // Approximate horizontal centering of left half.
     s_u8g2.drawStr(0, 42, buf);
 
-    // -- Unit and arrow separator --
+    // -- Unit and horizontal arrow separator --
     s_u8g2.setFont(u8g2_font_6x10_tf);
     s_u8g2.drawStr(60, 28, "\xb0""C");   // "°C"
 
-    s_u8g2.setFont(u8g2_font_open_iconic_arrow_2x_t);
-    s_u8g2.drawGlyph(60, 45, 0x004f);    // right arrow
+    // Plain "->" rendered as text: unambiguously horizontal, no glyph
+    // surprises across font versions. Two chars "->" at 6px = 12px wide.
+    s_u8g2.setFont(u8g2_font_7x14B_tf);  // bold for visibility
+    s_u8g2.drawStr(60, 45, "->");
 
     // -- Target temperature (smaller) --
     s_u8g2.setFont(u8g2_font_logisoso16_tn);
@@ -100,22 +106,37 @@ static void drawStatusLine() {
     s_u8g2.drawHLine(0, 49, 128);
     s_u8g2.setFont(u8g2_font_6x10_tf);
 
-    // Cooler indicator.
+    // Cooler indicator. Verbose strings to avoid misreading at a glance.
+    //   "COOLING *" = relay energized (visible 6x10 font, ~54px wide)
+    //   "not cool"  = relay off (lowercase = idle, no risk of misreading)
     if (state::g.cooler_id[0] != '\0') {
         if (state::g.cooler_on) {
-            s_u8g2.drawStr(0, 62, "COOL *");   // active: with bullet
+            s_u8g2.drawStr(0, 62, "COOLING *");
         } else {
-            s_u8g2.drawStr(0, 62, "cool");     // idle: lowercase, no bullet
+            s_u8g2.drawStr(0, 62, "not cool");
         }
     }
     // Heater indicator (only if a heater is configured).
     if (state::g.heater_id[0] != '\0') {
-        const char* h = state::g.heater_on ? "HEAT *" : "heat";
-        s_u8g2.drawStr(48, 62, h);
+        const char* h = state::g.heater_on ? "HEATING *" : "not heat";
+        s_u8g2.drawStr(64, 62, h);
     }
 
-    // Mode: AUTO or OFF, right-aligned.
-    const char* mode = (state::g.mode == state::Mode::AUTO) ? "AUTO" : "OFF";
+    // Mode: AUTO / MANUAL / OFF, right-aligned.
+    //  - AUTO   : CBPi regulates (fermenter.state = true)
+    //  - MANUAL : CBPi is not regulating BUT cooler or heater is on.
+    //             Means someone forced the actor on via CBPi UI directly,
+    //             bypassing the fermenter logic. Important to surface so
+    //             operators don't assume "OFF means safe / nothing running".
+    //  - OFF    : everything idle, no regulation, no manual override.
+    const char* mode;
+    if (state::g.mode == state::Mode::AUTO) {
+        mode = "AUTO";
+    } else if (state::g.cooler_on || state::g.heater_on) {
+        mode = "MANUAL";
+    } else {
+        mode = "OFF";
+    }
     const int w = s_u8g2.getStrWidth(mode);
     s_u8g2.drawStr(128 - w, 62, mode);
 }
