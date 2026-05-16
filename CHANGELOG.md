@@ -5,6 +5,7 @@ All notable changes to this project. Format based on [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Fixed
+- **TZ string was ignored on some ESP8266 Arduino core versions** — symptom was the daily reboot firing at `WDT_DAILY_REBOOT_HOUR` UTC instead of local time (e.g. scheduled at 04:00 French time fired at 06:00 CEST). Replaced `configTime(tz, ntp1, ntp2)` with the portable `configTime(0, 0, ntp1, ntp2)` + `setenv("TZ", NTP_TZ, 1)` + `tzset()` POSIX dance, which works on every libc-based ESP core. The NTP-synced log line now prints both UTC and local time so timezone misconfiguration is visible immediately rather than hours later when the reboot fires at the wrong hour.
 - **Watchdog reboot reason was lost when MQTT was unreachable.** The data-stale watchdog fires precisely when MQTT is unreachable (otherwise messages would keep arriving and reset the stale timer), so `publishRebootIntent()` was silently skipping publishes ("publishStatus skipped: not connected") and the device looked indistinguishable from a brutal crash on the broker side. Fixed by persisting the reboot reason in ESP8266 RTC user memory (12 bytes, survives software reset as long as power is maintained). At the next boot, after MQTT reconnects, the recovered reason is published retained on `display/<DEVICE_NAME>/last_reboot_reason`. Daily reboots (where MQTT is usually still up) publish via both paths — immediate MQTT for live observers, RTC fallback for resilience.
 
 ### Added

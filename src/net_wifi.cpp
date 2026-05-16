@@ -31,9 +31,19 @@ static void onGotIp(const WiFiEventStationModeGotIP& evt) {
     state::g.net_status = state::NetStatus::WIFI_OK;
 
     // Kick off NTP sync — non-blocking, the time becomes valid in a
-    // few seconds. configTime is safe to call multiple times.
-    configTime(NTP_TZ, NTP_SERVER_1, NTP_SERVER_2);
-    Serial.printf("[wifi] NTP sync requested (tz=%s)\n", NTP_TZ);
+    // few seconds.
+    //
+    // IMPORTANT: configTime(tz_string, ...) is unstable across ESP8266
+    // Arduino core versions — older cores treat the TZ string as just
+    // an arbitrary token and the resulting time is UTC. Symptom: a daily
+    // reboot scheduled at 04:00 fires at 04:00 UTC = 06:00 French summer
+    // time. The portable fix is to sync NTP with offset 0 (= UTC) and then
+    // apply the timezone via the standard POSIX setenv("TZ", ...)+tzset()
+    // mechanism, which works on every libc including newlib-based ESP cores.
+    configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);
+    setenv("TZ", NTP_TZ, 1);
+    tzset();
+    Serial.printf("[wifi] NTP sync requested, TZ=%s\n", NTP_TZ);
 }
 
 static void onDisconnected(const WiFiEventStationModeDisconnected& evt) {

@@ -186,7 +186,16 @@ void loop() {
 #endif
                           );
         } else {
-            Serial.printf("[wdt] NTP synced, local time available\n");
+            // Print both UTC and local time, so misconfigured TZ shows up
+            // visibly in the serial log. If they differ by the expected
+            // offset (e.g. +1h or +2h for France), TZ is correctly applied.
+            struct tm tm_utc, tm_local;
+            gmtime_r(&now_t, &tm_utc);
+            localtime_r(&now_t, &tm_local);
+            Serial.printf("[wdt] NTP synced: UTC=%02d:%02d local=%02d:%02d (TZ=%s)\n",
+                          tm_utc.tm_hour, tm_utc.tm_min,
+                          tm_local.tm_hour, tm_local.tm_min,
+                          NTP_TZ);
         }
     }
 
