@@ -149,7 +149,7 @@ void publishRebootIntent(RebootReason reason) {
     // and a Home Assistant observer can distinguish planned vs crash.
     // If MQTT is down (typical for DATA_STALE), these calls silently skip
     // — the RTC-persisted reason will be published at the next boot.
-    net_mqtt::publishStatus(LWT_PAYLOAD_REBOOTING, /*retain=*/true);
+    net_mqtt::publishStatus(LWT_VALUE_REBOOTING, /*retain=*/true);
     net_mqtt::publishLastRebootReason(reasonStr(reason));
 }
 

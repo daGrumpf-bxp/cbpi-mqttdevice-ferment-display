@@ -132,14 +132,21 @@ An applicative watchdog reboots the device if no fresh MQTT data is received for
 
 ## External monitoring (Home Assistant, Node-RED, etc.)
 
-The firmware publishes its own state via MQTT, so anything that can speak MQTT can monitor it. Useful topics:
+The firmware publishes its own state via MQTT, so anything that can speak MQTT can monitor it.
 
-| Topic | Retained | Values | When published |
+| Topic | Retained | Payload format | When published |
 |---|---|---|---|
-| `display/<DEVICE_NAME>/status` | yes | `online` | After every successful MQTT connect |
-| `display/<DEVICE_NAME>/status` | yes | `rebooting` | Before a planned reboot (data-stale or daily) |
-| `display/<DEVICE_NAME>/status` | yes | `offline` | Auto-published by the broker (LWT) on TCP drop = crash |
-| `display/<DEVICE_NAME>/last_reboot_reason` | yes | `data_stale`, `daily` | Right before a planned reboot |
+| `display/<DEVICE_NAME>/status` | yes | `{"value":"online","ts":"UTC 2026-05-18T14:32:11Z"}` | After every successful MQTT connect |
+| `display/<DEVICE_NAME>/status` | yes | `{"value":"rebooting","ts":"UTC ..."}` | Before a planned reboot (data-stale or daily) |
+| `display/<DEVICE_NAME>/status` | yes | `{"value":"offline","ts":"unknown, set by broker LWT"}` | Auto-published by the broker (LWT) on TCP drop = crash |
+| `display/<DEVICE_NAME>/last_reboot_reason` | yes | `{"value":"data_stale","ts":"UTC ..."}` or `{"value":"daily","ts":"UTC ..."}` | Right before a planned reboot |
+
+### Payload format notes
+
+The `ts` field is **always self-describing**:
+- **Sync OK**: `"UTC 2026-05-18T14:32:11Z"` — explicit `UTC ` prefix so it's obvious during debug. ISO 8601 format with Zulu suffix for tools that parse it.
+- **No NTP sync yet**: `"no NTP sync, uptime=12345ms"` — uptime in milliseconds as fallback. Self-documenting so you immediately know why the field looks weird.
+- **Offline (LWT)**: `"unknown, set by broker LWT"` — the LWT payload is registered statically with the broker at connect time, so we can't know in advance when (or whether) it will be published. Observers should use their own reception timestamp for offline events.
 
 To check device state from a shell:
 
@@ -149,13 +156,13 @@ mosquitto_sub -h <broker> -v -t 'display/+/status' -t 'display/+/last_reboot_rea
 
 Output example, healthy device:
 ```
-display/ferm-tornado/status               online
-display/ferm-tornado/last_reboot_reason   daily
+display/ferm-tornado/status               {"value":"online","ts":"UTC 2026-05-18T14:32:11Z"}
+display/ferm-tornado/last_reboot_reason   {"value":"daily","ts":"UTC 2026-05-18T04:00:01Z"}
 ```
 
 Output, device crashed:
 ```
-display/ferm-tornado/status               offline   ← LWT fired, investigate
+display/ferm-tornado/status               {"value":"offline","ts":"unknown, set by broker LWT"}
 ```
 
 This makes it trivial to integrate later with notification systems (Telegram via Node-RED, Home Assistant alerts, etc.) without firmware changes.

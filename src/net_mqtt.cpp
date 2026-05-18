@@ -11,6 +11,7 @@
 #include "watchdog.h"
 
 #include <AsyncMqttClient.h>
+#include <time.h>     // time(), gmtime_r() for the ts field in status JSON
 
 namespace net_mqtt {
 
@@ -144,8 +145,9 @@ static void onMqttConnect(bool sessionPresent) {
     state::g.net_status = state::NetStatus::MQTT_OK;
 
     // Tell observers we're alive — retained so anyone who subscribes
-    // later still sees us as online.
-    s_client.publish(s_topic_status, 0, /*retain=*/true, LWT_PAYLOAD_ONLINE);
+    // later still sees us as online. publishStatus() formats the JSON
+    // payload with timestamp.
+    publishStatus(LWT_VALUE_ONLINE, /*retain=*/true);
 
     // If the previous boot left a reboot reason in RTC (typically because
     // it rebooted while MQTT was down), publish it now retained.
@@ -246,10 +248,13 @@ void begin() {
     s_client.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
     s_client.setClientId(DEVICE_NAME);
 
-    // Last Will & Testament: broker will publish "offline" retained on
+    // Last Will & Testament: broker will publish offline JSON retained on
     // s_topic_status if we drop without a clean DISCONNECT (= crash).
-    // Signature: setWill(topic, qos, retain, payload)
-    s_client.setWill(s_topic_status, 0, true, LWT_PAYLOAD_OFFLINE);
+    // The ts in this payload is set to "unknown" because MQTT LWT is
+    // statically registered with the broker at connect time — we can't
+    // know when (or even if) it will be published later. Observers
+    // should use their own reception timestamp for offline events.
+    s_client.setWill(s_topic_status, 0, true, LWT_PAYLOAD_OFFLINE_JSON);
     if (MQTT_USER[0] != '\0') {
         s_client.setCredentials(MQTT_USER, MQTT_PASS);
     }
@@ -278,6 +283,36 @@ bool isConnected() {
     return s_client.connected();
 }
 
+// ---- timestamp helpers -----------------------------------------------------
+// Format the current wall-clock time as an ISO 8601 UTC string with an
+// explicit "UTC " prefix for readability. If NTP hasn't synced yet, fall
+// back to a self-describing uptime-based marker.
+//
+// Output examples (writes into caller-provided buf):
+//   "UTC 2026-05-18T14:32:11Z"
+//   "no NTP sync, uptime=12345ms"
+static void formatTimestamp(char* buf, size_t buf_size) {
+    time_t now_t = time(nullptr);
+    if (now_t >= 1577836800UL /* 2020-01-01 */) {
+        struct tm tm_utc;
+        gmtime_r(&now_t, &tm_utc);
+        snprintf(buf, buf_size, "UTC %04d-%02d-%02dT%02d:%02d:%02dZ",
+                 tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
+                 tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
+    } else {
+        snprintf(buf, buf_size, "no NTP sync, uptime=%lums",
+                 (unsigned long)millis());
+    }
+}
+
+// Build a JSON status payload: {"value":"<status>","ts":"<timestamp>"}
+// Buffer must be large enough — ~80 bytes covers all cases.
+static void formatStatusPayload(char* buf, size_t buf_size, const char* status) {
+    char ts[48];
+    formatTimestamp(ts, sizeof(ts));
+    snprintf(buf, buf_size, "{\"value\":\"%s\",\"ts\":\"%s\"}", status, ts);
+}
+
 // ---- public API for the watchdog -------------------------------------------
 void publishStatus(const char* status, bool retain) {
     if (!s_client.connected()) {
@@ -285,12 +320,18 @@ void publishStatus(const char* status, bool retain) {
                       status);
         return;
     }
-    s_client.publish(s_topic_status, 0, retain, status);
+    char payload[128];
+    formatStatusPayload(payload, sizeof(payload), status);
+    Serial.printf("[mqtt] publish %s -> %s\n", s_topic_status, payload);
+    s_client.publish(s_topic_status, 0, retain, payload);
 }
 
 void publishLastRebootReason(const char* reason_id) {
     if (!s_client.connected()) return;
-    s_client.publish(s_topic_last_rb, 0, /*retain=*/true, reason_id);
+    char payload[128];
+    formatStatusPayload(payload, sizeof(payload), reason_id);
+    Serial.printf("[mqtt] publish %s -> %s\n", s_topic_last_rb, payload);
+    s_client.publish(s_topic_last_rb, 0, /*retain=*/true, payload);
 }
 
 void shutdownClean() {

@@ -119,7 +119,17 @@
 //                  connection without sending DISCONNECT first (= crash)
 #define LWT_TOPIC_PREFIX         "display/"
 #define LWT_TOPIC_SUFFIX         "/status"
-#define LWT_PAYLOAD_ONLINE       "online"
-#define LWT_PAYLOAD_REBOOTING    "rebooting"
-#define LWT_PAYLOAD_OFFLINE      "offline"
+
+// status field values (used as the "value" key in JSON payload)
+#define LWT_VALUE_ONLINE         "online"
+#define LWT_VALUE_REBOOTING      "rebooting"
+#define LWT_VALUE_OFFLINE        "offline"
+
+// The LWT payload is FIXED at the time we register it with the broker, so
+// the ts can't be dynamic — the broker publishes it verbatim later when
+// the client drops. We mark this explicitly in the payload so observers
+// know to use their own reception timestamp for "offline" events.
+#define LWT_PAYLOAD_OFFLINE_JSON \
+    "{\"value\":\"offline\",\"ts\":\"unknown, set by broker LWT\"}"
+
 #define LWT_LAST_REBOOT_SUFFIX   "/last_reboot_reason"
