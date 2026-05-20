@@ -1,56 +1,70 @@
 # cbpi-mqttdevice-ferment-display
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Status: Phase 1](https://img.shields.io/badge/status-phase%201%20%E2%80%93%20hardware%20validated-brightgreen)
+![Status: SPI port](https://img.shields.io/badge/status-SPI%20port%20%E2%80%93%20pending%20hardware%20validation-yellow)
 ![Target: ESP8266](https://img.shields.io/badge/target-Wemos%20D1%20mini-green)
 ![Server: CBPi4](https://img.shields.io/badge/server-CraftBeerPi4-orange)
 
 Wall-mounted display next to a fermenter, driven by [CraftBeerPi4](https://github.com/PiBrewing/craftbeerpi4) over MQTT. Shows current and target temperature, regulation mode, and live cooler/heater state.
 
-**Phase 1 (current)** — read-only display on **Wemos D1 mini** (ESP8266) + **SSD1306 128×64 OLED**.
-**Phase 2 (planned, hardware in transit)** — full UI on **ESP32 WROOM-32** + **ST7789V 2.0" TFT 240×320** + rotary encoder + buttons, with local setpoint and mode control.
+**Phase 1 (current)** — Wemos D1 mini (ESP8266) + ST7789V TFT 2.0" 240×320 SPI in landscape.
+**Phase 2 (planned)** — port to ESP32 WROOM-32, same screen, plus rotary encoder and buttons for local setpoint and mode control.
+
+> **Branch `feat/spi-display`**: this iteration replaces the previous SSD1306 0.96" I²C OLED with the larger ST7789V TFT in preparation for the ESP32 phase. The SSD1306 historical version remains accessible at git tag `v0.7.10` on `main`.
 
 ---
 
 ## What it shows
 
-Four real-world states the display surfaces, photographed from a working Wemos D1 mini + SSD1306 setup:
+> 📷 Real ST7789V photos will land here after the first successful hardware bring-up. For the historical SSD1306 OLED photos that documented Phase 1's first iteration, see git tag `v0.7.10` on `main`.
 
-| State | Photo | Meaning |
-|---|---|---|
-| **OFF** | ![OFF](docs/images/oled_state_off.jpg) | Fermenter not regulating. Cooler relay off. Nothing's happening — explicitly. |
-| **AUTO idle** | ![AUTO idle](docs/images/oled_state_auto_idle.jpg) | CBPi regulates. Current T° is at or below target, so the cooler stays off. The system is "armed but quiet". |
-| **AUTO cooling** | ![AUTO cooling](docs/images/oled_state_auto_cooling.jpg) | CBPi regulates. Current T° is above target (here: target dropped to 2.0°C for demo) — cooler is energized, hysteresis loop active. |
-| **MANUAL** | ![MANUAL](docs/images/oled_state_manual.jpg) | Fermenter regulation is OFF, but a relay is energized anyway — meaning someone forced it on via the CBPi UI actor controls, bypassing the fermenter logic. Surfaced explicitly so operators don't assume "OFF means nothing's running". |
+Four states the display surfaces:
+
+| State | Meaning |
+|---|---|
+| **OFF** | Fermenter not regulating. Cooler relay off. Nothing's happening — explicitly. |
+| **AUTO idle** | CBPi regulates. Current T° is at or below target, so the cooler stays off. The system is "armed but quiet". |
+| **AUTO cooling** | CBPi regulates. Current T° is above target — cooler is energized, hysteresis loop active. |
+| **MANUAL** | Fermenter regulation is OFF, but a relay is energized anyway — meaning someone forced it on via the CBPi UI actor controls, bypassing the fermenter logic. Surfaced explicitly so operators don't assume "OFF means nothing's running". |
 
 ### Layout breakdown
 
 ```
-+--------------------------------+
-| Tornado          WIFI MQTT     |  fermenter name (top-left)
-|                                |  connectivity status (top-right):
-|                                |    WIFI  = associated to AP, got IP
-|                                |    MQTT  = connected to broker, subscribed
-|--------------------------------|
-|                                |
-|   11.6   °C   ->   20.0        |  current temp -> target temp
-|                                |  (-- shown if value not yet known)
-|                                |
-|--------------------------------|
-|  not cool             AUTO     |  cooler/heater state · regulation mode
-+--------------------------------+
+0                                                  320
++----------------------------------------------------+ 0
+|  Tornado                              WIFI  MQTT   |  title bar (32px)
++----------------------------------------------------+ 32
+|                                                    |
+|      11.6   °C      ->      20.0                   |  temperature (100px)
+|                                                    |
++----------------------------------------------------+ 132
+|                                                    |
+|    not cool                          AUTO          |  status (52px)
+|                                                    |
++----------------------------------------------------+ 184
+|                                                    |
+|     (reserved for Phase 2 UI extensions)           |  free space (38px)
+|                                                    |
++----------------------------------------------------+ 222
+|  10.23.79.7   14:32 local   v0.8.0    up 12m       |  footer (18px, dim)
++----------------------------------------------------+ 240
 ```
 
 **Bottom-right status field** is computed live from CBPi4 state:
-- **`AUTO`** — `fermenter.state == true` (CBPi regulating per hysteresis)
-- **`MANUAL`** — `fermenter.state == false` but cooler or heater is energized (someone overrode)
-- **`OFF`** — everything idle
+- **`AUTO`** in green — `fermenter.state == true` (CBPi regulating per hysteresis)
+- **`MANUAL`** in yellow — `fermenter.state == false` but cooler or heater is energized (someone overrode)
+- **`OFF`** in dim grey — everything idle
 
-**Cooler/heater label** uses verbose case to avoid misreading at a glance:
-- `not cool` / `COOLING *` (relay off / on)
-- `not heat` / `HEATING *` (when a heater is configured)
+**Cooler/heater label** uses verbose case + color accent to avoid misreading at a glance:
+- `not cool` (grey) / `COOLING *` (cyan)
+- `not heat` (grey) / `HEATING *` (orange)
 
-**Stale indicator**: a `!` to the right of the target temperature signals stale data (>90s with no update from CBPi4 — typically indicates the server or broker is down). The applicative watchdog will reboot the device automatically if this persists past 181 seconds.
+**Stale indicator**: a `!` in red appears at the right of the temperature band if no fresh data arrived in 90s. The applicative watchdog will reboot the device automatically if the data outage persists past 181 seconds.
+
+**Footer** carries operator-useful info:
+- Local IP — convenient for SSH/ping/HTTP-flash without consulting the router
+- Local time (or "no NTP" when not synced yet) — at-a-glance check that NTP works
+- Firmware version + uptime — quick health check
 
 The onboard blue LED gives status at a glance, **without needing to look at the screen or serial**:
 
@@ -70,7 +84,7 @@ The onboard blue LED gives status at a glance, **without needing to look at the 
 
 - A Linux machine for development (Windows/macOS work too, paths and udev rules differ)
 - A Wemos D1 mini board (clones with CH340 or CP2102 USB-serial work)
-- An SSD1306 I²C OLED (1.3" SH1106 works too — just swap the U8g2 constructor in `display.cpp`)
+- A ST7789V TFT 2.0" 240×320 SPI display
 - A running CBPi4 instance with MQTT enabled, a fermenter configured, and a working MQTT broker (typically `mosquitto` on the same Pi as CBPi4)
 
 ### Install PlatformIO (one-time setup)
@@ -102,16 +116,26 @@ mosquitto_sub -h <broker> -v -t 'cbpi/fermenterupdate/#'
 # Toggle a fermenter in CBPi4 UI — the topic contains the ID.
 ```
 
-### Wiring (D1 mini + SSD1306)
+### Wiring (D1 mini + ST7789V TFT 2.0" 240×320 SPI)
 
-| OLED | D1 mini |
-|---|---|
-| GND | GND |
-| VCC | 3V3 |
-| SDA | D2 (GPIO 4) |
-| SCL | D1 (GPIO 5) |
+8 wires this time (vs 4 for the SSD1306 I²C). The hardware-SPI pins (SCK, MOSI, CS) are fixed on the D1 mini; the two control pins (DC, RST) are GPIOs chosen to avoid the ESP8266 boot-strap pins.
 
-Pin assignments are in `include/config.h` — edit there if you need different pins (e.g. on a board where D1/D2 are already used for relays).
+| ST7789V | D1 mini | GPIO | Role |
+|---|---|---|---|
+| GND | GND | — | Ground |
+| VCC | 3V3 | — | 3.3V (panel tolerates 5V on some breakouts, 3.3V is safer) |
+| SCL / SCK | D5 | GPIO14 | HSPI clock (hardware-fixed) |
+| SDA / MOSI | D7 | GPIO13 | HSPI data (hardware-fixed) |
+| CS | D8 | GPIO15 | HSPI chip select (hardware-fixed) |
+| DC | D1 | GPIO5 | Data/command select (any free GPIO) |
+| RES | D2 | GPIO4 | Hardware reset (any free GPIO) |
+| BLK | 3V3 | — | Backlight, always on |
+
+**Pins to never use for TFT control on the ESP8266**:
+- GPIO0 (D3) and GPIO2 (D4) are boot-strap pins — a TFT reset pulse on them at power-up can put the chip in flash mode by accident
+- GPIO2 (D4) additionally drives the onboard LED used by the heartbeat module
+
+Pin assignments are set via `build_flags` in `platformio.ini` (TFT_eSPI requires compile-time defines for inlining). Edit there if your wiring differs.
 
 ---
 
@@ -285,24 +309,12 @@ Means no `fermenterupdate` or `sensordata` arrived in the last 90s. Check:
 - CBPi4 is running, MQTT is enabled (`mqtt: True` in `config.yaml`)
 - Broker is healthy: `systemctl status mosquitto`
 
-### OLED screen blank / `[disp] no I2C ACK at 0x3C`
+### TFT screen blank or showing garbage
 
-The firmware probes the I²C bus at boot and retries every 5s. If you see `no I2C ACK at 0x3C (err=N) — wiring/power?` repeating in serial:
-
-| err | Meaning | Most likely cause |
-|---:|---|---|
-| 1 | data too long for transmit buffer | Library/code bug — shouldn't happen for a zero-byte probe |
-| 2 | NACK on transmit of address | OLED not responding — wrong address (try 0x3D), or wiring fault |
-| 3 | NACK on transmit of data | Wiring intermittent, capacitive interference |
-| 4 | other error | Bus held low — short, wrong pin, dead chip |
-
-Diagnostic steps in order:
-1. **Check the address jumper on the back of the OLED** — some modules ship as 0x3D. Update `OLED_I2C_ADDR` in `include/config.h`.
-2. **Reseat the dupont wires** — particularly SDA/SCL. Dupont contacts loosen over time, especially after a few months of bench use.
-3. **Check VCC is on 3V3, not 5V** — some OLED modules don't tolerate 5V on their logic side.
-4. **Add a 100 µF capacitor between VCC and GND of the OLED** — the SSD1306 controller is sensitive to brown-outs during WiFi TX bursts on the D1 mini.
-5. **Try lowering the I²C clock** in `config.h`: `#define I2C_CLOCK_HZ 50000UL` (50 kHz). Helps with long or noisy cables.
-6. **Swap the OLED** with a known-good unit if you have one. The hot-plug retry means you can plug a new OLED in while the device runs and you'll see `[disp] OLED recovered after retry` once it's detected.
+1. **Check the wiring**, all 8 wires. SPI is more sensitive to bad contacts than I²C — particularly SCK and MOSI. Reseat dupont connectors firmly. Long flying-wire jumpers (>15cm) can cause issues at 27 MHz — shorten if possible, or lower `SPI_FREQUENCY` in `platformio.ini` to `20000000` (20 MHz).
+2. **Check VCC** — most ST7789V breakouts work at 3.3V. Some panels accept 5V on VCC but their data lines stay at 3.3V logic — that's fine. Don't put 5V if the silkscreen says 3.3V only.
+3. **Backlight (BLK)** — if VCC is OK but the screen is black, check the BLK pin is wired to 3V3. Some boards integrate a transistor for PWM dimming on BLK; in that case BLK needs a HIGH GPIO not just 3V3.
+4. **Wrong driver detection** — if the screen shows garbled colors or shifted pixels, you might have an ST7735 or ILI9341 panel instead of ST7789V. The `ST7789_DRIVER=1` flag in `platformio.ini` is specific. Look at the IC silkscreen on the back of the breakout.
 
 ### Tests fail locally
 
@@ -316,20 +328,19 @@ If a test fails, your local CBPi4 might emit a slightly different payload than w
 
 ## Roadmap
 
-### Phase 1 — D1 mini + OLED (current)
+### Phase 1 — D1 mini + display (current)
 
 - [x] Non-blocking WiFi (event-driven, `WiFi.onEvent*`)
 - [x] Async MQTT (AsyncMqttClient, dynamic subscription tracking)
 - [x] CBPi4 fermenter / sensor / raw actor parsing
 - [x] Onboard LED status patterns
-- [x] SSD1306 128×64 rendering via U8g2
 - [x] Host-side unit tests (29 cases against real CBPi4 payloads)
-- [x] OLED hot-plug detection (I²C ACK probe + retry every 5s)
 - [x] Applicative watchdog (data-stale + daily wall-clock reboot)
 - [x] NTP sync (France TZ with DST)
-- [x] MQTT LWT (online / rebooting / offline) for external observability
-- [x] Field test on real fermenter (Tornado) — 4 states validated (OFF, AUTO idle, AUTO cooling, MANUAL)
-- [ ] Field test over multiple days (long-term stability)
+- [x] MQTT LWT with JSON timestamped status payloads
+- [x] SSD1306 128×64 I²C rendering (frozen at tag `v0.7.10`)
+- [ ] **ST7789V 240×320 SPI rendering in landscape (this branch)** — port in progress, hardware bring-up pending
+- [ ] Field test on real fermenter with new screen
 - [ ] 3D-printed enclosure (front plate STL)
 
 ### Phase 2 — ESP32 + TFT + encoder

@@ -22,18 +22,18 @@
 #define WIFI_BOOT_TIMEOUT_MS     30000  // log a warning if not connected after this
 
 // ---- Display tuning ---------------------------------------------------
-// I2C pins on Wemos D1 mini: SDA=D2 (GPIO4), SCL=D1 (GPIO5).
-// These are the Arduino defaults for ESP8266; we keep them explicit anyway.
-#define I2C_SDA_PIN              4   // D2
-#define I2C_SCL_PIN              5   // D1
-#define OLED_I2C_ADDR            0x3C
-#define DISPLAY_REFRESH_MS       500  // redraw at most every 500ms
+// ST7789V TFT 240x320 IPS SPI, rendered in landscape (320 wide x 240 tall).
+// Pin assignment is set via TFT_eSPI build_flags in platformio.ini, NOT
+// here — the lib needs the pins as compile-time defines for inlining.
+//
+// Backlight: hardwired to 3V3 in current setup (always on). Future Phase 2
+// may add a PWM dimming control if needed for night mode.
+#define DISPLAY_REFRESH_MS       500   // redraw at most twice per second
 
-// I2C bus clock. 100kHz is the safe default and works with any cable length
-// up to ~50cm. Raise to 400000 (400kHz) if you want faster refresh AND
-// your wiring is short. Lower to 50000 (50kHz) if you see I2C glitches
-// (e.g. on long dupont cables in a noisy electrical environment).
-#define I2C_CLOCK_HZ             100000UL
+// SPI frequency lives in platformio.ini (SPI_FREQUENCY=27000000). 27 MHz
+// is conservative for ESP8266 — the SPI peripheral can do 40 MHz but
+// quality of dupont cabling tends to fail above ~30 MHz. Lower to
+// 20000000 if you see corruption on long wires.
 
 // ---- State staleness --------------------------------------------------
 // If we haven't received an update for this long, consider the data stale

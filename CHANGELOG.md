@@ -2,6 +2,26 @@
 
 All notable changes to this project. Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — `feat/spi-display` branch
+
+### Changed
+- **Display backend swap: SSD1306 0.96" I²C → ST7789V 2.0" SPI in landscape (320×240).**
+  - `src/display.cpp` completely rewritten on top of TFT_eSPI with direct-draw (no framebuffer — ESP8266 only has ~50 KB usable RAM, can't hold a 153 KB RGB565 buffer).
+  - Public API (`display::begin()`, `display::loop()`) unchanged — the rest of the firmware doesn't notice the change. This is exactly why we kept the display module isolated from day one.
+  - Layout transposed and scaled up: title bar (32px), large temperature band (100px), status line (52px), reserved space for Phase 2 UI (38px), thin info footer (18px) with IP / local time / firmware version / uptime.
+  - Color used sparingly for status accents: green AUTO, yellow MANUAL, dim grey OFF, cyan COOLING, orange HEATING, red stale `!`. Body of the layout stays white-on-black for OLED-like readability at distance.
+  - Dirty-region rendering: each loop tick we compute what changed in `state::g` and only repaint the affected band. Avoids flicker on direct-draw and keeps SPI traffic low.
+- **`platformio.ini`**: TFT_eSPI configuration moved to `build_flags` (required by the lib for inlining). Adds ~30 lines of `-D` flags. `U8g2` lib_dep removed.
+- **Wiring**: 8 wires now instead of 4. Pin assignments avoid GPIO0 (D3) and GPIO2 (D4) which are boot-strap pins on ESP8266 — a TFT reset pulse on them at boot could put the chip in flash mode by accident.
+- **`state::g.local_ip[16]`** added — populated by `net_wifi::onGotIp`, used by the display footer.
+
+### Migration notes
+- The previous SSD1306 firmware remains accessible via `git checkout v0.7.10`. The current branch is `feat/spi-display`, which will be merged into `main` once hardware is validated. After merge, the SSD1306 backend is **gone** — there's no multi-target setup. Reasons documented in `ARCHITECTURE.md`.
+
+## [0.7.10] — 2026-05-18
+
+Phase 1 hardware-validated release with SSD1306 0.96" I²C OLED. Final iteration of the I²C-only firmware before the SPI port.
+
 ## [Unreleased]
 
 ### Changed

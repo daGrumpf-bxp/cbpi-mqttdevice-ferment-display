@@ -33,10 +33,15 @@ struct State {
     // -- Connectivity --
     NetStatus net_status = NetStatus::DISCONNECTED;
 
+    // Local IP address as dotted string, e.g. "10.23.79.7". Populated by
+    // net_wifi on GotIP. Shown on the display footer for quick reference
+    // (so we can ping/SSH/HTTP-flash without consulting the router).
+    char local_ip[16] = "";
+
     // -- Hardware presence --
-    // True once the OLED has been successfully detected on the I2C bus.
-    // The firmware will retry init periodically if this is false (so the
-    // OLED can be hot-plugged at runtime without rebooting the device).
+    // True once the display has been successfully initialised. The
+    // firmware will retry init periodically if this is false (so the
+    // display can be hot-plugged at runtime without rebooting the device).
     bool display_ready = false;
 
     // -- Fermenter identity (received from cbpi/fermenterupdate/<id>) --

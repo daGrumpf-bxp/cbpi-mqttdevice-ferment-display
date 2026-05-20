@@ -1,239 +1,366 @@
 // ============================================================================
-// display.cpp — SSD1306 128x64 layout with U8g2
+// display.cpp — ST7789V 240x320 TFT in landscape (320x240) via TFT_eSPI
 // ============================================================================
-// Layout target (128x64):
+// Public API (begin/loop) is unchanged from the SSD1306 version. The internal
+// rendering is completely rewritten because:
+//   - TFT_eSPI uses direct-draw (no framebuffer) — required on ESP8266 which
+//     can't hold a 153 KB RGB565 framebuffer in its 50 KB usable RAM.
+//   - Color is now available: we use it sparingly for status accents only
+//     (green AUTO, yellow MANUAL, red stale). Body of the layout stays
+//     white-on-black for OLED-like readability at distance.
+//   - Layout is landscape 320x240, scaled-up version of the SSD1306 layout
+//     plus a thin footer with IP / local time / firmware version / uptime.
 //
-//   +------------------------------+
-//   | Tornado              W M     |   line 1 (10px): name + status icons
-//   |------------------------------|
-//   |                              |
-//   |   15.9°C    >   25.0°C       |   middle: big current T° / target T°
-//   |                              |
-//   |------------------------------|
-//   |  COOL  *           AUTO      |   bottom line: cooler state + mode
-//   +------------------------------+
-//
-// We use full-buffer mode (firstPage/nextPage NOT needed) for simplicity.
-// Frame ~1KB of RAM, fine on D1 mini.
+// Direct-draw means clearScreen() per redraw would cause flicker — we instead
+// track what changed and only redraw the regions that actually need it.
+// For Phase 1 (this branch) we redraw everything every DISPLAY_REFRESH_MS but
+// only when at least one field actually changed since the last frame. This
+// is cheap enough at 2 Hz and avoids over-engineering before we measure
+// actual flicker on hardware.
 // ============================================================================
 #include "display.h"
-#include "state.h"
 #include "config.h"
+#include "state.h"
 
-#include <U8g2lib.h>
-#include <Wire.h>
+#include <Arduino.h>
+#include <TFT_eSPI.h>
+#include <time.h>
 
 namespace display {
 
-// SSD1306 128x64, hardware I2C, full framebuffer.
-// Constructor: rotation=R0, reset=NONE (no reset pin wired).
-static U8G2_SSD1306_128X64_NONAME_F_HW_I2C s_u8g2(
-    U8G2_R0, /*reset=*/U8X8_PIN_NONE);
+// ---- TFT object and layout constants ---------------------------------------
+static TFT_eSPI s_tft;
 
-static uint32_t s_last_draw_ms = 0;
+// Landscape orientation: 320 wide x 240 tall.
+//   setRotation(1) = USB connector on the right
+//   setRotation(3) = USB connector on the left
+// We use rotation 1 by default; flip in config.h if your mounting is opposite.
+#ifndef TFT_ROTATION
+#define TFT_ROTATION 1
+#endif
 
-// ---- helpers ----------------------------------------------------------------
-static void drawNetIcons() {
-    // Top-right corner: WIFI / MQTT presence indicators.
-    // Each appears only when the corresponding layer is up.
-    // Using full words rather than single letters — much clearer at a glance,
-    // and we have plenty of horizontal space on 128px.
-    s_u8g2.setFont(u8g2_font_5x7_tf);
+static constexpr int16_t W = 320;
+static constexpr int16_t H = 240;
+
+// Vertical band offsets (top y of each region).
+static constexpr int16_t Y_TITLE    = 0;
+static constexpr int16_t Y_TEMP     = 32;
+static constexpr int16_t Y_STATUS   = 134;
+static constexpr int16_t Y_RESERVED = 184;
+static constexpr int16_t Y_FOOTER   = 222;
+
+// Colors (TFT_eSPI 16-bit RGB565 macros).
+static constexpr uint16_t C_BG       = TFT_BLACK;
+static constexpr uint16_t C_FG       = TFT_WHITE;
+static constexpr uint16_t C_DIM      = 0x52AA;   // ~grey for secondary text
+static constexpr uint16_t C_DIVIDER  = 0x2104;   // very dark grey
+static constexpr uint16_t C_AUTO     = TFT_GREEN;
+static constexpr uint16_t C_MANUAL   = TFT_YELLOW;
+static constexpr uint16_t C_OFF      = C_DIM;
+static constexpr uint16_t C_COOLING  = TFT_CYAN;
+static constexpr uint16_t C_HEATING  = TFT_ORANGE;
+static constexpr uint16_t C_STALE    = TFT_RED;
+static constexpr uint16_t C_OK       = TFT_GREEN;
+
+// ---- Init state + retry ---------------------------------------------------
+static bool     s_display_ready    = false;
+static uint32_t s_last_retry_ms    = 0;
+static uint32_t s_last_draw_ms     = 0;
+static constexpr uint32_t DISPLAY_RETRY_MS = 5000;
+
+// ---- Cached previous values for dirty checking ----------------------------
+// We compare on every loop tick; if nothing changed, we don't repaint.
+// This avoids flicker on direct-draw screens with no framebuffer.
+struct Cache {
+    char     fermenter_name[32] = "";
+    float    current_temp = 999.0f;
+    float    target_temp  = 999.0f;
+    state::Mode mode      = state::Mode::OFF;
+    bool     cooler_on    = false;
+    bool     heater_on    = false;
+    bool     stale        = false;
+    state::NetStatus net_status = state::NetStatus::DISCONNECTED;
+    char     local_ip[16] = "";
+    int      footer_minute = -1;   // re-render footer at most once per min
+};
+static Cache s_cache;
+
+// ---- Init helpers ---------------------------------------------------------
+static bool tryInit() {
+    s_tft.init();
+    s_tft.setRotation(TFT_ROTATION);
+    s_tft.fillScreen(C_BG);
+
+    // Quick self-test pattern — confirms SPI is talking and the panel
+    // initialised. Three lines, 200 ms total, then cleared.
+    s_tft.setTextColor(C_FG, C_BG);
+    s_tft.setTextDatum(MC_DATUM);  // middle-center anchoring
+    s_tft.drawString("cbpi-mqttdevice", W/2, H/2 - 20, 4);
+    s_tft.drawString("ferment-display", W/2, H/2 + 10, 4);
+    s_tft.drawString("booting...", W/2, H/2 + 40, 2);
+    delay(200);
+    s_tft.fillScreen(C_BG);
+
+    Serial.println("[disp] ST7789V init OK (320x240 landscape)");
+    return true;
+}
+
+// ---- Drawing helpers ------------------------------------------------------
+// Erase a horizontal band (used before redrawing a region).
+static void clearBand(int16_t y, int16_t h) {
+    s_tft.fillRect(0, y, W, h, C_BG);
+}
+
+static void drawDivider(int16_t y) {
+    s_tft.drawFastHLine(8, y, W - 16, C_DIVIDER);
+}
+
+// Title bar: fermenter name (left), WIFI/MQTT indicators (right).
+static void drawTitleBar() {
+    clearBand(Y_TITLE, 30);
+    s_tft.setTextDatum(TL_DATUM);  // top-left
+    s_tft.setTextColor(C_FG, C_BG);
+    s_tft.drawString(state::g.fermenter_name[0] ? state::g.fermenter_name
+                                                : "(waiting...)",
+                     8, Y_TITLE + 4, 4);
+
+    // Connectivity indicators: WIFI then MQTT, right-aligned.
     using state::NetStatus;
-    NetStatus s = state::g.net_status;
-
+    const NetStatus s = state::g.net_status;
     const bool wifi_ok = (s == NetStatus::WIFI_OK
                        || s == NetStatus::MQTT_OK
                        || s == NetStatus::SUBSCRIBED);
     const bool mqtt_ok = (s == NetStatus::MQTT_OK
                        || s == NetStatus::SUBSCRIBED);
 
-    // "WIFI" = 4 chars × 5px = 20px, "MQTT" = 4 chars × 5px = 20px
-    // Layout: ........WIFI MQTT  (right-aligned, ending at x=128)
-    if (wifi_ok) s_u8g2.drawStr( 83, 8, "WIFI");
-    if (mqtt_ok) s_u8g2.drawStr(108, 8, "MQTT");
+    s_tft.setTextDatum(TR_DATUM);  // top-right
+    s_tft.setTextColor(mqtt_ok ? C_OK : C_DIM, C_BG);
+    s_tft.drawString("MQTT", W - 8, Y_TITLE + 8, 2);
+    s_tft.setTextColor(wifi_ok ? C_OK : C_DIM, C_BG);
+    s_tft.drawString("WIFI", W - 56, Y_TITLE + 8, 2);
+
+    drawDivider(Y_TITLE + 30);
 }
 
-static void drawTitleBar() {
-    s_u8g2.setFont(u8g2_font_6x10_tf);
-    const char* name = state::g.has_fermenter
-                     ? state::g.fermenter_name
-                     : "(waiting...)";
-    s_u8g2.drawStr(0, 8, name);
-    drawNetIcons();
-    s_u8g2.drawHLine(0, 11, 128);
-}
-
+// Temperature block: huge current, "->" arrow, smaller target on the right.
+// Stale "!" appended after target if data is too old.
 static void drawTempBlock() {
+    clearBand(Y_TEMP, 100);
     char buf[16];
 
-    // -- Current temperature (large) --
-    s_u8g2.setFont(u8g2_font_logisoso24_tn);  // 24px tall numerals
+    // Current temperature (large, font 7 = ~48px tall 7-segment numerals).
     if (isnan(state::g.current_temp)) {
-        snprintf(buf, sizeof(buf), "--.--");
+        snprintf(buf, sizeof(buf), "--.-");
     } else {
         snprintf(buf, sizeof(buf), "%.1f", state::g.current_temp);
     }
-    // Approximate horizontal centering of left half.
-    s_u8g2.drawStr(0, 42, buf);
+    s_tft.setTextColor(C_FG, C_BG);
+    s_tft.setTextDatum(ML_DATUM);
+    s_tft.drawString(buf, 12, Y_TEMP + 50, 7);
 
-    // -- Unit and horizontal arrow separator --
-    s_u8g2.setFont(u8g2_font_6x10_tf);
-    s_u8g2.drawStr(60, 28, "\xb0""C");   // "°C"
+    // °C unit, smaller, near the current temp.
+    s_tft.setTextDatum(BL_DATUM);
+    s_tft.drawString("`C", 152, Y_TEMP + 38, 4);   // `C reads as °C in font 4
 
-    // Plain "->" rendered as text: unambiguously horizontal, no glyph
-    // surprises across font versions. Two chars "->" at 6px = 12px wide.
-    s_u8g2.setFont(u8g2_font_7x14B_tf);  // bold for visibility
-    s_u8g2.drawStr(60, 45, "->");
+    // Arrow.
+    s_tft.setTextDatum(MC_DATUM);
+    s_tft.drawString("->", 190, Y_TEMP + 50, 6);
 
-    // -- Target temperature (smaller) --
-    s_u8g2.setFont(u8g2_font_logisoso16_tn);
+    // Target temperature (smaller, font 6).
     if (isnan(state::g.target_temp)) {
         snprintf(buf, sizeof(buf), "--.-");
     } else {
         snprintf(buf, sizeof(buf), "%.1f", state::g.target_temp);
     }
-    s_u8g2.drawStr(80, 42, buf);
+    s_tft.setTextDatum(ML_DATUM);
+    s_tft.drawString(buf, 220, Y_TEMP + 50, 6);
 
-    // Stale warning: flash a '!' if data is too old.
+    // Stale "!" indicator after target if data is too old.
     if (state::isStale()) {
-        s_u8g2.setFont(u8g2_font_6x10_tf);
-        s_u8g2.drawStr(122, 28, "!");
+        s_tft.setTextColor(C_STALE, C_BG);
+        s_tft.setTextDatum(MR_DATUM);
+        s_tft.drawString("!", W - 8, Y_TEMP + 50, 6);
     }
+
+    drawDivider(Y_TEMP + 100);
 }
 
+// Status line: cooler/heater verb on the left, mode (AUTO/MANUAL/OFF) right.
 static void drawStatusLine() {
-    s_u8g2.drawHLine(0, 49, 128);
-    s_u8g2.setFont(u8g2_font_6x10_tf);
+    clearBand(Y_STATUS, 50);
+    s_tft.setTextDatum(ML_DATUM);
 
-    // Cooler indicator. Verbose strings to avoid misreading at a glance.
-    //   "COOLING *" = relay energized (visible 6x10 font, ~54px wide)
-    //   "not cool"  = relay off (lowercase = idle, no risk of misreading)
+    // Cooler/heater label. Verbose case to avoid misreading at a glance.
     if (state::g.cooler_id[0] != '\0') {
         if (state::g.cooler_on) {
-            s_u8g2.drawStr(0, 62, "COOLING *");
+            s_tft.setTextColor(C_COOLING, C_BG);
+            s_tft.drawString("COOLING *", 12, Y_STATUS + 25, 4);
         } else {
-            s_u8g2.drawStr(0, 62, "not cool");
+            s_tft.setTextColor(C_DIM, C_BG);
+            s_tft.drawString("not cool", 12, Y_STATUS + 25, 4);
         }
     }
-    // Heater indicator (only if a heater is configured).
     if (state::g.heater_id[0] != '\0') {
-        const char* h = state::g.heater_on ? "HEATING *" : "not heat";
-        s_u8g2.drawStr(64, 62, h);
+        if (state::g.heater_on) {
+            s_tft.setTextColor(C_HEATING, C_BG);
+            s_tft.drawString("HEATING *", 140, Y_STATUS + 25, 4);
+        } else {
+            s_tft.setTextColor(C_DIM, C_BG);
+            s_tft.drawString("not heat", 140, Y_STATUS + 25, 4);
+        }
     }
 
-    // Mode: AUTO / MANUAL / OFF, right-aligned.
-    //  - AUTO   : CBPi regulates (fermenter.state = true)
-    //  - MANUAL : CBPi is not regulating BUT cooler or heater is on.
-    //             Means someone forced the actor on via CBPi UI directly,
-    //             bypassing the fermenter logic. Important to surface so
-    //             operators don't assume "OFF means safe / nothing running".
-    //  - OFF    : everything idle, no regulation, no manual override.
-    const char* mode;
+    // Mode: AUTO (green) / MANUAL (yellow) / OFF (dim grey), right-aligned.
+    const char* mode_str;
+    uint16_t    mode_col;
     if (state::g.mode == state::Mode::AUTO) {
-        mode = "AUTO";
+        mode_str = "AUTO";
+        mode_col = C_AUTO;
     } else if (state::g.cooler_on || state::g.heater_on) {
-        mode = "MANUAL";
+        mode_str = "MANUAL";
+        mode_col = C_MANUAL;
     } else {
-        mode = "OFF";
+        mode_str = "OFF";
+        mode_col = C_OFF;
     }
-    const int w = s_u8g2.getStrWidth(mode);
-    s_u8g2.drawStr(128 - w, 62, mode);
+    s_tft.setTextColor(mode_col, C_BG);
+    s_tft.setTextDatum(MR_DATUM);
+    s_tft.drawString(mode_str, W - 12, Y_STATUS + 25, 4);
+
+    drawDivider(Y_STATUS + 50);
 }
 
-static void drawBootScreen() {
-    s_u8g2.setFont(u8g2_font_6x10_tf);
-    s_u8g2.drawStr(0,  10, "mqttdevice-ferment");
-    s_u8g2.drawStr(0,  22, "boot...");
-    using state::NetStatus;
-    const char* nets = "?";
-    switch (state::g.net_status) {
-        case NetStatus::DISCONNECTED: nets = "wifi connecting"; break;
-        case NetStatus::WIFI_OK:      nets = "mqtt connecting"; break;
-        case NetStatus::MQTT_OK:      nets = "subscribing";     break;
-        case NetStatus::SUBSCRIBED:   nets = "ready";           break;
+// Footer: IP / local time / firmware build / uptime — small dim text.
+static void drawFooter() {
+    clearBand(Y_FOOTER, 18);
+    s_tft.setTextColor(C_DIM, C_BG);
+
+    // IP, left-aligned.
+    s_tft.setTextDatum(ML_DATUM);
+    s_tft.drawString(state::g.local_ip[0] ? state::g.local_ip : "(no ip)",
+                     6, Y_FOOTER + 9, 1);
+
+    // Local time, centered. Falls back to uptime if NTP not synced.
+    char tbuf[24];
+    const time_t now_t = time(nullptr);
+    if (now_t >= 1577836800UL /* 2020 */) {
+        struct tm tm_local;
+        localtime_r(&now_t, &tm_local);
+        snprintf(tbuf, sizeof(tbuf), "%02d:%02d local",
+                 tm_local.tm_hour, tm_local.tm_min);
+    } else {
+        snprintf(tbuf, sizeof(tbuf), "no NTP");
     }
-    s_u8g2.drawStr(0,  34, nets);
-}
+    s_tft.setTextDatum(MC_DATUM);
+    s_tft.drawString(tbuf, W/2, Y_FOOTER + 9, 1);
 
-// ---- I2C presence probe ----------------------------------------------------
-// Send a zero-length write to OLED_I2C_ADDR. Returns 0 if the device ACKs
-// (=present), non-zero otherwise. Doesn't depend on U8g2 — pure Wire.
-//
-// Why this matters: U8g2's begin() does not reliably return false if the
-// display is missing (signature varies across versions/clones). The Wire
-// transmit ACK is the only portable way to know if anything is on the bus.
-static int probeI2C(uint8_t addr) {
-    Wire.beginTransmission(addr);
-    return Wire.endTransmission();  // 0 = ACK, others = NACK/timeout/error
-}
-
-// ---- Init state ------------------------------------------------------------
-// We track whether the display was initialised successfully. If not, we
-// keep trying every DISPLAY_RETRY_MS so that hot-plugging the OLED while
-// the device is running will eventually pick it up.
-static bool     s_display_ready    = false;
-static uint32_t s_last_retry_ms    = 0;
-static constexpr uint32_t DISPLAY_RETRY_MS = 5000;
-
-// Try to initialise the OLED. Returns true on success.
-static bool tryInit() {
-    const int err = probeI2C(OLED_I2C_ADDR);
-    if (err != 0) {
-        Serial.printf("[disp] no I2C ACK at 0x%02X (err=%d) — wiring/power?\n",
-                      OLED_I2C_ADDR, err);
-        return false;
+    // Uptime, right-aligned. Format adapts: "12m", "3h42m", "5d3h".
+    const uint32_t up_s = millis() / 1000UL;
+    char ubuf[16];
+    if (up_s < 60UL * 60UL) {
+        snprintf(ubuf, sizeof(ubuf), "up %lum", (unsigned long)(up_s / 60UL));
+    } else if (up_s < 24UL * 3600UL) {
+        snprintf(ubuf, sizeof(ubuf), "up %luh%02lum",
+                 (unsigned long)(up_s / 3600UL),
+                 (unsigned long)((up_s / 60UL) % 60UL));
+    } else {
+        snprintf(ubuf, sizeof(ubuf), "up %lud%luh",
+                 (unsigned long)(up_s / 86400UL),
+                 (unsigned long)((up_s / 3600UL) % 24UL));
     }
-    s_u8g2.setI2CAddress(OLED_I2C_ADDR << 1);
-    s_u8g2.begin();
-    s_u8g2.setFontMode(0);
-    s_u8g2.setDrawColor(1);
-    // Quick self-test: send a clear+flush. If the bus is flaky this is
-    // where it shows up.
-    s_u8g2.clearBuffer();
-    s_u8g2.sendBuffer();
-    Serial.printf("[disp] SSD1306 init OK at 0x%02X\n", OLED_I2C_ADDR);
-    return true;
+    s_tft.setTextDatum(MR_DATUM);
+    s_tft.drawString(ubuf, W - 6, Y_FOOTER + 9, 1);
 }
 
-// ---- public API ------------------------------------------------------------
+// Detect what changed between cache and current state. Returns a bitfield
+// describing which regions need redraw. Bit 0 = title, 1 = temp, 2 = status,
+// 3 = footer.
+static uint8_t computeDirty() {
+    uint8_t dirty = 0;
+    if (strcmp(s_cache.fermenter_name, state::g.fermenter_name) != 0
+        || s_cache.net_status != state::g.net_status) {
+        dirty |= 0x01;
+    }
+    if (s_cache.current_temp != state::g.current_temp
+        || s_cache.target_temp  != state::g.target_temp
+        || s_cache.stale        != state::isStale()) {
+        dirty |= 0x02;
+    }
+    if (s_cache.mode      != state::g.mode
+        || s_cache.cooler_on != state::g.cooler_on
+        || s_cache.heater_on != state::g.heater_on) {
+        dirty |= 0x04;
+    }
+    // Footer changes when IP changes, or once per minute (for the clock),
+    // or every redraw if uptime crossed a 1-minute boundary.
+    const time_t now_t = time(nullptr);
+    int cur_minute = -1;
+    if (now_t >= 1577836800UL) {
+        struct tm tm_local;
+        localtime_r(&now_t, &tm_local);
+        cur_minute = tm_local.tm_min;
+    }
+    if (strcmp(s_cache.local_ip, state::g.local_ip) != 0
+        || s_cache.footer_minute != cur_minute) {
+        dirty |= 0x08;
+        s_cache.footer_minute = cur_minute;
+    }
+    return dirty;
+}
+
+static void commitCache() {
+    strncpy(s_cache.fermenter_name, state::g.fermenter_name,
+            sizeof(s_cache.fermenter_name) - 1);
+    s_cache.current_temp = state::g.current_temp;
+    s_cache.target_temp  = state::g.target_temp;
+    s_cache.mode         = state::g.mode;
+    s_cache.cooler_on    = state::g.cooler_on;
+    s_cache.heater_on    = state::g.heater_on;
+    s_cache.stale        = state::isStale();
+    s_cache.net_status   = state::g.net_status;
+    strncpy(s_cache.local_ip, state::g.local_ip,
+            sizeof(s_cache.local_ip) - 1);
+}
+
+// ---- public API -----------------------------------------------------------
 void begin() {
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-    Wire.setClock(I2C_CLOCK_HZ);   // explicit, see config.h
-
     s_display_ready = tryInit();
     s_last_retry_ms = millis();
     state::g.display_ready = s_display_ready;
+
+    // Force full redraw on first loop tick.
+    memset(&s_cache, 0xFF, sizeof(s_cache));
+    s_cache.fermenter_name[0] = '\0';   // make strcmp work
+    s_cache.local_ip[0]       = '\0';
+    s_cache.footer_minute     = -1;
 }
 
 void loop() {
     const uint32_t now = millis();
 
-    // Retry init if we don't have the display yet.
     if (!s_display_ready) {
         if ((now - s_last_retry_ms) < DISPLAY_RETRY_MS) return;
         s_last_retry_ms = now;
         s_display_ready = tryInit();
         state::g.display_ready = s_display_ready;
         if (s_display_ready) {
-            Serial.println("[disp] OLED recovered after retry");
+            Serial.println("[disp] TFT recovered after retry");
         }
         if (!s_display_ready) return;
-        // If we just recovered the display, fall through and render.
     }
 
     if ((now - s_last_draw_ms) < DISPLAY_REFRESH_MS) return;
     s_last_draw_ms = now;
 
-    s_u8g2.clearBuffer();
-    if (!state::g.has_fermenter) {
-        drawBootScreen();
-    } else {
-        drawTitleBar();
-        drawTempBlock();
-        drawStatusLine();
-    }
-    s_u8g2.sendBuffer();
+    const uint8_t dirty = computeDirty();
+    if (dirty == 0) return;
+
+    if (dirty & 0x01) drawTitleBar();
+    if (dirty & 0x02) drawTempBlock();
+    if (dirty & 0x04) drawStatusLine();
+    if (dirty & 0x08) drawFooter();
+
+    commitCache();
 }
 
 } // namespace display

@@ -30,6 +30,11 @@ static void onGotIp(const WiFiEventStationModeGotIP& evt) {
                   evt.mask.toString().c_str());
     state::g.net_status = state::NetStatus::WIFI_OK;
 
+    // Cache the IP as a string for the display footer.
+    const String ip_str = evt.ip.toString();
+    strncpy(state::g.local_ip, ip_str.c_str(), sizeof(state::g.local_ip) - 1);
+    state::g.local_ip[sizeof(state::g.local_ip) - 1] = '\0';
+
     // Kick off NTP sync — non-blocking, the time becomes valid in a
     // few seconds.
     //
@@ -54,6 +59,7 @@ static void onDisconnected(const WiFiEventStationModeDisconnected& evt) {
     Serial.printf("[wifi] DISCONNECTED from %s, reason=%d\n",
                   evt.ssid.c_str(), evt.reason);
     state::g.net_status = state::NetStatus::DISCONNECTED;
+    state::g.local_ip[0] = '\0';
 }
 
 void begin() {
