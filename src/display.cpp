@@ -34,7 +34,7 @@ static TFT_eSPI s_tft;
 // Landscape orientation: 320 wide x 240 tall.
 //   setRotation(1) = USB connector on the right
 //   setRotation(3) = USB connector on the left
-// We use rotation 1 by default; flip in config.h if your mounting is opposite.
+// Try the other value if your mounting is mirrored.
 #ifndef TFT_ROTATION
 #define TFT_ROTATION 1
 #endif
@@ -52,8 +52,13 @@ static constexpr int16_t Y_FOOTER   = 222;
 // Colors (TFT_eSPI 16-bit RGB565 macros).
 static constexpr uint16_t C_BG       = TFT_BLACK;
 static constexpr uint16_t C_FG       = TFT_WHITE;
-static constexpr uint16_t C_DIM      = 0x52AA;   // ~grey for secondary text
+// "Dim" = light grey for secondary text. Originally 0x52AA but that's
+// almost invisible on a real IPS panel — on a SSD1306 OLED it was binary
+// pixels-on/off so anything-not-black read as white. On TFT we need a
+// genuine mid-grey to keep the visual hierarchy.
+static constexpr uint16_t C_DIM      = 0xBDF7;   // ~RGB(189, 189, 189), light grey
 static constexpr uint16_t C_DIVIDER  = 0x2104;   // very dark grey
+static constexpr uint16_t C_FOOTER   = 0x9CD3;   // slightly dimmer than C_DIM, for footer
 static constexpr uint16_t C_AUTO     = TFT_GREEN;
 static constexpr uint16_t C_MANUAL   = TFT_YELLOW;
 static constexpr uint16_t C_OFF      = C_DIM;
@@ -73,17 +78,24 @@ static constexpr uint32_t DISPLAY_RETRY_MS = 5000;
 // This avoids flicker on direct-draw screens with no framebuffer.
 struct Cache {
     char     fermenter_name[32] = "";
-    float    current_temp = 999.0f;
-    float    target_temp  = 999.0f;
+    float    current_temp = 0.0f;
+    float    target_temp  = 0.0f;
     state::Mode mode      = state::Mode::OFF;
     bool     cooler_on    = false;
     bool     heater_on    = false;
+    // We must track presence of cooler/heater too: when MQTT first
+    // populates cooler_id (~3s after boot), drawStatusLine() starts
+    // drawing "not cool" — but only if we mark the status band dirty.
+    // Tracking the presence as a boolean here is enough.
+    bool     cooler_present = false;
+    bool     heater_present = false;
     bool     stale        = false;
     state::NetStatus net_status = state::NetStatus::DISCONNECTED;
     char     local_ip[16] = "";
     int      footer_minute = -1;   // re-render footer at most once per min
 };
 static Cache s_cache;
+static bool  s_first_draw_pending = true;   // forces full redraw on tick 1
 
 // ---- Init helpers ---------------------------------------------------------
 static bool tryInit() {
@@ -91,17 +103,29 @@ static bool tryInit() {
     s_tft.setRotation(TFT_ROTATION);
     s_tft.fillScreen(C_BG);
 
-    // Quick self-test pattern — confirms SPI is talking and the panel
-    // initialised. Three lines, 200 ms total, then cleared.
+    // Log effective dimensions: tells us at-a-glance if rotation is what
+    // we expected. Landscape should print 320x240; portrait would be
+    // 240x320 (in which case adjust TFT_ROTATION).
+    const int16_t w = s_tft.width();
+    const int16_t h = s_tft.height();
+    Serial.printf("[disp] ST7789V init OK, effective dims %dx%d (rotation=%d)\n",
+                  w, h, TFT_ROTATION);
+    if (w != W || h != H) {
+        Serial.printf("[disp] WARNING: expected %dx%d (landscape), got %dx%d. "
+                      "Try changing TFT_ROTATION (0,1,2,3) in display.cpp.\n",
+                      W, H, w, h);
+    }
+
+    // Short text splash — visible enough to know we booted, gone fast
+    // enough not to delay the first real frame.
     s_tft.setTextColor(C_FG, C_BG);
-    s_tft.setTextDatum(MC_DATUM);  // middle-center anchoring
+    s_tft.setTextDatum(MC_DATUM);
     s_tft.drawString("cbpi-mqttdevice", W/2, H/2 - 20, 4);
     s_tft.drawString("ferment-display", W/2, H/2 + 10, 4);
     s_tft.drawString("booting...", W/2, H/2 + 40, 2);
-    delay(200);
+    delay(300);
     s_tft.fillScreen(C_BG);
 
-    Serial.println("[disp] ST7789V init OK (320x240 landscape)");
     return true;
 }
 
@@ -162,9 +186,21 @@ static void drawTempBlock() {
     s_tft.setTextDatum(BL_DATUM);
     s_tft.drawString("`C", 152, Y_TEMP + 38, 4);   // `C reads as °C in font 4
 
-    // Arrow.
-    s_tft.setTextDatum(MC_DATUM);
-    s_tft.drawString("->", 190, Y_TEMP + 50, 6);
+    // Arrow pointing from current to target, drawn as primitives. Using
+    // text "->" doesn't work in font 6 (digit-only) and looks ugly in
+    // other fonts because the dash and ">" don't align nicely. A solid
+    // arrow rendered with fillRect (shaft) + fillTriangle (head) gives
+    // a clean, readable indicator that scales well visually.
+    {
+        const int16_t ay = Y_TEMP + 50;  // arrow centerline y
+        // Shaft: 30px long, 5px thick.
+        s_tft.fillRect(170, ay - 2, 30, 5, C_FG);
+        // Head: pointed triangle, 14px wide.
+        s_tft.fillTriangle(200, ay - 9,
+                           200, ay + 9,
+                           214, ay,
+                           C_FG);
+    }
 
     // Target temperature (smaller, font 6).
     if (isnan(state::g.target_temp)) {
@@ -173,7 +209,7 @@ static void drawTempBlock() {
         snprintf(buf, sizeof(buf), "%.1f", state::g.target_temp);
     }
     s_tft.setTextDatum(ML_DATUM);
-    s_tft.drawString(buf, 220, Y_TEMP + 50, 6);
+    s_tft.drawString(buf, 222, Y_TEMP + 50, 6);
 
     // Stale "!" indicator after target if data is too old.
     if (state::isStale()) {
@@ -233,7 +269,7 @@ static void drawStatusLine() {
 // Footer: IP / local time / firmware build / uptime — small dim text.
 static void drawFooter() {
     clearBand(Y_FOOTER, 18);
-    s_tft.setTextColor(C_DIM, C_BG);
+    s_tft.setTextColor(C_FOOTER, C_BG);
 
     // IP, left-aligned.
     s_tft.setTextDatum(ML_DATUM);
@@ -286,9 +322,11 @@ static uint8_t computeDirty() {
         || s_cache.stale        != state::isStale()) {
         dirty |= 0x02;
     }
-    if (s_cache.mode      != state::g.mode
-        || s_cache.cooler_on != state::g.cooler_on
-        || s_cache.heater_on != state::g.heater_on) {
+    if (s_cache.mode          != state::g.mode
+        || s_cache.cooler_on     != state::g.cooler_on
+        || s_cache.heater_on     != state::g.heater_on
+        || s_cache.cooler_present != (state::g.cooler_id[0] != '\0')
+        || s_cache.heater_present != (state::g.heater_id[0] != '\0')) {
         dirty |= 0x04;
     }
     // Footer changes when IP changes, or once per minute (for the clock),
@@ -311,13 +349,15 @@ static uint8_t computeDirty() {
 static void commitCache() {
     strncpy(s_cache.fermenter_name, state::g.fermenter_name,
             sizeof(s_cache.fermenter_name) - 1);
-    s_cache.current_temp = state::g.current_temp;
-    s_cache.target_temp  = state::g.target_temp;
-    s_cache.mode         = state::g.mode;
-    s_cache.cooler_on    = state::g.cooler_on;
-    s_cache.heater_on    = state::g.heater_on;
-    s_cache.stale        = state::isStale();
-    s_cache.net_status   = state::g.net_status;
+    s_cache.current_temp   = state::g.current_temp;
+    s_cache.target_temp    = state::g.target_temp;
+    s_cache.mode           = state::g.mode;
+    s_cache.cooler_on      = state::g.cooler_on;
+    s_cache.heater_on      = state::g.heater_on;
+    s_cache.cooler_present = (state::g.cooler_id[0] != '\0');
+    s_cache.heater_present = (state::g.heater_id[0] != '\0');
+    s_cache.stale          = state::isStale();
+    s_cache.net_status     = state::g.net_status;
     strncpy(s_cache.local_ip, state::g.local_ip,
             sizeof(s_cache.local_ip) - 1);
 }
@@ -327,12 +367,7 @@ void begin() {
     s_display_ready = tryInit();
     s_last_retry_ms = millis();
     state::g.display_ready = s_display_ready;
-
-    // Force full redraw on first loop tick.
-    memset(&s_cache, 0xFF, sizeof(s_cache));
-    s_cache.fermenter_name[0] = '\0';   // make strcmp work
-    s_cache.local_ip[0]       = '\0';
-    s_cache.footer_minute     = -1;
+    s_first_draw_pending = true;   // force complete repaint on first loop()
 }
 
 void loop() {
@@ -345,6 +380,7 @@ void loop() {
         state::g.display_ready = s_display_ready;
         if (s_display_ready) {
             Serial.println("[disp] TFT recovered after retry");
+            s_first_draw_pending = true;   // repaint everything from scratch
         }
         if (!s_display_ready) return;
     }
@@ -352,7 +388,11 @@ void loop() {
     if ((now - s_last_draw_ms) < DISPLAY_REFRESH_MS) return;
     s_last_draw_ms = now;
 
-    const uint8_t dirty = computeDirty();
+    uint8_t dirty = computeDirty();
+    if (s_first_draw_pending) {
+        s_first_draw_pending = false;
+        dirty = 0x0F;   // all 4 regions
+    }
     if (dirty == 0) return;
 
     if (dirty & 0x01) drawTitleBar();

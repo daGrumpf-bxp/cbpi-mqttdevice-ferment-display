@@ -1,7 +1,7 @@
 # cbpi-mqttdevice-ferment-display
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![Status: SPI port](https://img.shields.io/badge/status-SPI%20port%20%E2%80%93%20pending%20hardware%20validation-yellow)
+![Status: SPI port](https://img.shields.io/badge/status-SPI%20port%20%E2%80%93%20hardware%20validated-brightgreen)
 ![Target: ESP8266](https://img.shields.io/badge/target-Wemos%20D1%20mini-green)
 ![Server: CBPi4](https://img.shields.io/badge/server-CraftBeerPi4-orange)
 
@@ -118,7 +118,7 @@ mosquitto_sub -h <broker> -v -t 'cbpi/fermenterupdate/#'
 
 ### Wiring (D1 mini + ST7789V TFT 2.0" 240×320 SPI)
 
-8 wires this time (vs 4 for the SSD1306 I²C). The hardware-SPI pins (SCK, MOSI, CS) are fixed on the D1 mini; the two control pins (DC, RST) are GPIOs chosen to avoid the ESP8266 boot-strap pins.
+8 wires this time (vs 4 for the SSD1306 I²C). The hardware-SPI clock+MOSI pins are fixed on the D1 mini; the three control pins (CS, DC, RST) are GPIOs chosen to avoid the ESP8266 boot-strap pins.
 
 | ST7789V | D1 mini | GPIO | Role |
 |---|---|---|---|
@@ -126,14 +126,17 @@ mosquitto_sub -h <broker> -v -t 'cbpi/fermenterupdate/#'
 | VCC | 3V3 | — | 3.3V (panel tolerates 5V on some breakouts, 3.3V is safer) |
 | SCL / SCK | D5 | GPIO14 | HSPI clock (hardware-fixed) |
 | SDA / MOSI | D7 | GPIO13 | HSPI data (hardware-fixed) |
-| CS | D8 | GPIO15 | HSPI chip select (hardware-fixed) |
+| CS | D6 | GPIO12 | Chip select (moved off the boot-strap pin GPIO15) |
 | DC | D1 | GPIO5 | Data/command select (any free GPIO) |
 | RES | D2 | GPIO4 | Hardware reset (any free GPIO) |
 | BLK | 3V3 | — | Backlight, always on |
 
+**Why CS is NOT on the hardware SPI CS pin (GPIO15 / D8)**: GPIO15 is a boot-strap pin on the ESP8266 — it must be LOW at boot, otherwise the chip won't enter UART download mode (= you can't flash it). TFT modules typically pull CS high through their internal logic, which would brick the flashing workflow whenever the TFT is connected. We route CS to GPIO12 (D6) instead, which is the HSPI MISO line we don't use (TFT_MISO=-1 since we never read back from the screen). The trade-off: CS is now driven in software rather than by the HSPI hardware peripheral. This costs a few microseconds per transaction, irrelevant for a 2 Hz refresh.
+
 **Pins to never use for TFT control on the ESP8266**:
-- GPIO0 (D3) and GPIO2 (D4) are boot-strap pins — a TFT reset pulse on them at power-up can put the chip in flash mode by accident
-- GPIO2 (D4) additionally drives the onboard LED used by the heartbeat module
+- GPIO0 (D3) — boot-strap: LOW = bootloader, HIGH = run
+- GPIO2 (D4) — boot-strap: must be HIGH at boot, also drives the onboard LED used by heartbeat
+- GPIO15 (D8) — boot-strap: must be LOW at boot
 
 Pin assignments are set via `build_flags` in `platformio.ini` (TFT_eSPI requires compile-time defines for inlining). Edit there if your wiring differs.
 
@@ -315,6 +318,17 @@ Means no `fermenterupdate` or `sensordata` arrived in the last 90s. Check:
 2. **Check VCC** — most ST7789V breakouts work at 3.3V. Some panels accept 5V on VCC but their data lines stay at 3.3V logic — that's fine. Don't put 5V if the silkscreen says 3.3V only.
 3. **Backlight (BLK)** — if VCC is OK but the screen is black, check the BLK pin is wired to 3V3. Some boards integrate a transistor for PWM dimming on BLK; in that case BLK needs a HIGH GPIO not just 3V3.
 4. **Wrong driver detection** — if the screen shows garbled colors or shifted pixels, you might have an ST7735 or ILI9341 panel instead of ST7789V. The `ST7789_DRIVER=1` flag in `platformio.ini` is specific. Look at the IC silkscreen on the back of the breakout.
+5. **Bring-up debug trick** — to diagnose hardware issues, temporarily add an RGB sweep at the start of `display::tryInit()`:
+   ```cpp
+   s_tft.fillScreen(TFT_RED);   delay(400);
+   s_tft.fillScreen(TFT_GREEN); delay(400);
+   s_tft.fillScreen(TFT_BLUE);  delay(400);
+   ```
+   - **Nothing visible**: backlight off, or SPI wiring wrong (MOSI/SCK/CS)
+   - **Colors are swapped** (e.g. red shows blue): swap `TFT_RGB_ORDER` between `TFT_BGR` and `TFT_RGB` in `platformio.ini`
+   - **Speckle/noise instead of solid colors**: lower `SPI_FREQUENCY` or shorten the wires
+
+6. **PlatformIO build cache gotcha** — if you change pin assignments via `-D` flags in `platformio.ini` but the upload seems to flash the *old* configuration, run `pio run -t clean -t upload` to force a full rebuild. PlatformIO doesn't always invalidate the build cache on `build_flags` changes — only on source file changes.
 
 ### Tests fail locally
 
