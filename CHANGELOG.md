@@ -5,6 +5,7 @@ All notable changes to this project. Format based on [Keep a Changelog](https://
 ## [Unreleased]
 
 ### Changed
+- **Defer the "online" publish until NTP has synced**, so the retained payload on the broker carries a clean UTC timestamp from the very first byte. Falls back to publishing with the uptime-based ts after `NTP_SYNC_WARN_MS` (60s) for closed-LAN deployments where NTP is unreachable. Simpler than the alternative we briefly considered (publish immediately then re-publish on NTP sync), which would have required tracking transitions and managing two retained values for the same state. The current approach uses 6 lines in `loop()`.
 - **Status / reboot-reason payloads are now self-describing JSON with timestamps.** Format: `{"value":"<status>","ts":"<timestamp>"}`. The `ts` field is always explicit about its nature: `"UTC 2026-05-18T14:32:11Z"` when NTP is synced, `"no NTP sync, uptime=12345ms"` when NTP hasn't responded yet, or `"unknown, set by broker LWT"` for the offline LWT payload (which is static and can't carry a real timestamp). The `UTC ` prefix is deliberate — readability during debug beats compactness, and avoids the "wait, is Z really UTC?" moment when reading logs.
 - LWT offline payload also moved to JSON for format consistency. The `ts` is marked as unknown because MQTT 3.1.1 LWT is statically registered with the broker at connect time — observers wanting a real timestamp for offline events should use their own reception timestamp (this is exactly what an upcoming supervision dashboard will do — see roadmap).
 

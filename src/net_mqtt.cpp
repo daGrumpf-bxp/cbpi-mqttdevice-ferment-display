@@ -47,6 +47,12 @@ static char s_topic_fermenter[96] = "";
 static char s_topic_status[64]  = "";
 static char s_topic_last_rb[80] = "";
 
+// Deferred "online" publish — we wait for NTP sync (or a timeout) before
+// publishing the retained online status, so the ts field is clean from
+// the first byte the broker stores. See onMqttConnect() and loop().
+static bool     s_pending_online_publish   = false;
+static uint32_t s_online_deferred_since_ms = 0;
+
 // ---- forward declarations --------------------------------------------------
 static void onMqttConnect(bool sessionPresent);
 static void onMqttDisconnect(AsyncMqttClientDisconnectReason reason);
@@ -144,10 +150,13 @@ static void onMqttConnect(bool sessionPresent) {
     Serial.printf("[mqtt] connected (session_present=%d)\n", sessionPresent);
     state::g.net_status = state::NetStatus::MQTT_OK;
 
-    // Tell observers we're alive — retained so anyone who subscribes
-    // later still sees us as online. publishStatus() formats the JSON
-    // payload with timestamp.
-    publishStatus(LWT_VALUE_ONLINE, /*retain=*/true);
+    // Defer the "online" publish until NTP has given us a real wall-clock
+    // time, so the retained payload's ts field is clean from the very
+    // first byte the broker stores. Falls back to publishing with an
+    // uptime-based ts after NTP_SYNC_WARN_MS so closed-LAN deployments
+    // (where NTP is unreachable) still emit a status. See loop().
+    s_pending_online_publish = true;
+    s_online_deferred_since_ms = millis();
 
     // If the previous boot left a reboot reason in RTC (typically because
     // it rebooted while MQTT was down), publish it now retained.
@@ -274,9 +283,31 @@ static void connectIfNeeded() {
     s_last_reconnect_attempt = now;
 }
 
+// Publish the deferred "online" status as soon as NTP has synced — or
+// after a hard timeout (NTP_SYNC_WARN_MS) for closed-LAN deployments
+// where NTP is unreachable. In the timeout case the published ts will
+// be the self-documenting "no NTP sync, uptime=..." fallback, which
+// remains useful for observers.
+static void maybePublishDeferredOnline() {
+    if (!s_pending_online_publish) return;
+    if (!s_client.connected()) return;
+
+    const bool ntp_synced = (time(nullptr) >= 1577836800UL /* 2020 */);
+    const bool timeout    = (millis() - s_online_deferred_since_ms)
+                          >= NTP_SYNC_WARN_MS;
+    if (!ntp_synced && !timeout) return;
+
+    s_pending_online_publish = false;
+    if (!ntp_synced) {
+        Serial.println("[mqtt] publishing 'online' (NTP timeout, uptime fallback)");
+    }
+    publishStatus(LWT_VALUE_ONLINE, /*retain=*/true);
+}
+
 void loop() {
     if (!s_want_connected) return;
     connectIfNeeded();
+    maybePublishDeferredOnline();
 }
 
 bool isConnected() {

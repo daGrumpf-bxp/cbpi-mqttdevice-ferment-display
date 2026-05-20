@@ -167,10 +167,14 @@ void loop() {
     const uint32_t now    = millis();
     const uint32_t uptime = now - s_boot_ms;
 
-    // One-shot NTP warning: if we've been up long enough but NTP still
-    // hasn't given us a valid clock, log it once. This makes "closed LAN"
-    // deployments visible in the serial output instead of silently
-    // disabling the daily-reboot feature.
+    // One-shot NTP-not-synced warning. Fires if NTP hasn't given us a
+    // valid clock by NTP_SYNC_WARN_MS uptime. Self-documenting in serial:
+    // tells closed-LAN deployments to point NTP at a local time source.
+    //
+    // Note: the "online" status publish is deferred until NTP sync OR
+    // this same timeout, see net_mqtt.cpp::loop(). So the warning here
+    // and the fallback ts in the published "online" payload are
+    // anchored to the same deadline.
     if (!s_ntp_warned && uptime > NTP_SYNC_WARN_MS) {
         s_ntp_warned = true;
         time_t now_t = time(nullptr);
@@ -186,9 +190,8 @@ void loop() {
 #endif
                           );
         } else {
-            // Print both UTC and local time, so misconfigured TZ shows up
-            // visibly in the serial log. If they differ by the expected
-            // offset (e.g. +1h or +2h for France), TZ is correctly applied.
+            // NTP did sync, just want to log when (UTC vs local helps
+            // catch TZ misconfiguration immediately).
             struct tm tm_utc, tm_local;
             gmtime_r(&now_t, &tm_utc);
             localtime_r(&now_t, &tm_local);
